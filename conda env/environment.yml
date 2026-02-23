@@ -1,0 +1,17 @@
+# conda env create -f environment.yml
+# conda activate multicam_cube
+
+name: multicam_cube
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - numpy
+  - pyyaml
+  - open3d
+  - pip
+  # conda-forge opencv는 보통 aruco 모듈 포함(환경에 따라 다를 수 있음)
+  - opencv
+  - pip:
+      # RealSense 파이썬 바인딩 (환경에 따라 pip 설치가 안 될 수 있음)
+      - pyrealsense2
