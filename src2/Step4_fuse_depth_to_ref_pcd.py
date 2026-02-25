@@ -1,6 +1,15 @@
 # Step4_fuse_depth_to_ref_pcd.py
 # 전체 프레임 기반 검증/통합 + 단일 프레임 시각화
-
+"""
+python Step4_fuse_depth_to_ref_pcd.py \
+  --root_folder ./data/cube_session_01 \
+  --intrinsics_dir ./intrinsics \
+  --ref_cam_idx 0 \
+  --frame_idx 0 \
+  --use_depth \
+  --save_overlay \
+  --depth_cube_roi_margin_m 0.06
+"""
 """
 python Step4_fuse_depth_to_ref_pcd.py \
   --root_folder ./data/cube_session_01 \
@@ -599,6 +608,20 @@ def transform_points_rowvec(points, T_ref_cam):
     return points @ R.T + t.reshape(1, 3)
 
 
+def cube_roi_mask_in_ref(points_ref: np.ndarray, T_ref_cube: np.ndarray, half_extents_xyz: np.ndarray) -> np.ndarray:
+    """
+    ref 좌표계 점들을 큐브 좌표계(local)로 변환한 뒤 oriented box ROI 마스크를 만든다.
+    T_ref_cube: cube/object -> ref transform
+    """
+    if points_ref.size == 0:
+        return np.zeros((0,), dtype=bool)
+    R = T_ref_cube[:3, :3]
+    t = T_ref_cube[:3, 3]
+    pts_local = (points_ref - t.reshape(1, 3)) @ R
+    he = np.asarray(half_extents_xyz, dtype=np.float64).reshape(1, 3)
+    return np.all(np.abs(pts_local) <= he, axis=1)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--root_folder", type=str, required=True)
@@ -617,6 +640,19 @@ def main():
 
     parser.add_argument("--use_depth", action="store_true",
                         help="depth 이미지가 있을 때 frame_idx 한 프레임 fusion 수행")
+    parser.add_argument("--depth_stride", type=int, default=4,
+                        help="depth subsampling stride (default: 4)")
+    parser.add_argument("--depth_z_min", type=float, default=0.2,
+                        help="depth min range in meters")
+    parser.add_argument("--depth_z_max", type=float, default=1.5,
+                        help="depth max range in meters")
+    parser.add_argument("--depth_cube_roi", dest="depth_cube_roi", action="store_true",
+                        help="전역 큐브 pose 기준 ROI 박스로 depth를 crop (default: on)")
+    parser.add_argument("--no_depth_cube_roi", dest="depth_cube_roi", action="store_false",
+                        help="큐브 ROI crop 비활성화 (기존 동작)")
+    parser.add_argument("--depth_cube_roi_margin_m", type=float, default=0.06,
+                        help="큐브 반경계에 추가할 ROI margin (m), default=0.06")
+    parser.set_defaults(depth_cube_roi=True)
     args = parser.parse_args()
 
     try:
@@ -713,8 +749,20 @@ def main():
     )
 
     if args.use_depth:
-        stride, z_min, z_max = 4, 0.2, 1.5
+        stride = max(1, int(args.depth_stride))
+        z_min = float(args.depth_z_min)
+        z_max = float(args.depth_z_max)
         all_pts, all_cols = [], []
+        roi_half = None
+        if args.depth_cube_roi:
+            roi_half_scalar = (float(cfg.cube_side_m) * 0.5) + float(args.depth_cube_roi_margin_m)
+            roi_half = np.array([roi_half_scalar, roi_half_scalar, roi_half_scalar], dtype=np.float64)
+            print(
+                f"[INFO] Depth ROI(cube OBB): ON  half_extents="
+                f"({roi_half[0]:.3f}, {roi_half[1]:.3f}, {roi_half[2]:.3f})m"
+            )
+        else:
+            print("[INFO] Depth ROI(cube OBB): OFF")
 
         for ci in cam_indices:
             if ci not in T_ref:
@@ -738,12 +786,28 @@ def main():
 
             pts_cam, pix = depth_to_points_cam(depth_u16, K_map[ci], ds, z_min, z_max, stride)
             if pts_cam.shape[0] == 0:
+                print(f"[INFO] cam{ci}: 0 points after depth range/stride filter (skip)")
                 continue
+
+            raw_n = int(pts_cam.shape[0])
+            pix_arr = np.asarray(pix, dtype=np.int32)
             pts_ref = transform_points_rowvec(pts_cam, T_ref[ci])
-            cols    = np.array([rgb[v, u] for (v, u) in pix], dtype=np.float64)
+
+            if args.depth_cube_roi and roi_half is not None:
+                mask = cube_roi_mask_in_ref(pts_ref, T_cube_global, roi_half)
+                kept = int(np.count_nonzero(mask))
+                if kept == 0:
+                    print(f"[INFO] cam{ci}: raw={raw_n}  roi=0 (skip)")
+                    continue
+                pts_ref = pts_ref[mask]
+                pix_arr = pix_arr[mask]
+                print(f"[INFO] cam{ci}: raw={raw_n}  roi={kept} points fused")
+            else:
+                print(f"[INFO] cam{ci}: {raw_n} points fused")
+
+            cols = rgb[pix_arr[:, 0], pix_arr[:, 1]].astype(np.float64)
             all_pts.append(pts_ref)
             all_cols.append(cols)
-            print(f"[INFO] cam{ci}: {pts_ref.shape[0]} points fused")
 
         if all_pts:
             P = np.concatenate(all_pts, axis=0)
