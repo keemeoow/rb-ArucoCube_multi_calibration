@@ -1,6 +1,23 @@
 # Step4_fuse_depth_to_ref_pcd.py
 # 전체 프레임 기반 검증/통합 + 단일 프레임 시각화
 """
+******** 결과 잘나오게
+python Step4_fuse_depth_to_ref_pcd.py \
+  --root_folder ./data/cube_session_01 \
+  --intrinsics_dir ./intrinsics \
+  --ref_cam_idx 0 \
+  --frame_idx 0 \
+  --auto_best_frame \
+  --use_depth \
+  --save_overlay \
+  --depth_pose_mode frame \
+  --depth_cube_roi_margin_m 0.05 \
+  --depth_z_min 0.2 \
+  --depth_z_max 1.5 \
+  --depth_auto_z_window_m 0.10 \
+  --depth_stride 2
+"""
+"""
 python Step4_fuse_depth_to_ref_pcd.py \
   --root_folder ./data/cube_session_01 \
   --intrinsics_dir ./intrinsics \
@@ -285,6 +302,59 @@ def summarize_cube_consistency(obs_by_frame: Dict[int, List[dict]], T_global: np
         f"trans mean={np.mean(global_trans_mm):.2f}mm max={np.max(global_trans_mm):.2f}mm, "
         f"rot mean={np.mean(global_rot_deg):.2f}deg max={np.max(global_rot_deg):.2f}deg"
     )
+
+
+def estimate_frame_cube_pose(obs_by_frame: Dict[int, List[dict]], frame_id: int) -> Optional[np.ndarray]:
+    obs = obs_by_frame.get(int(frame_id), [])
+    if len(obs) == 0:
+        return None
+    Ts = [o["T_Cref_O"] for o in obs]
+    ws = [o["weight"] for o in obs]
+    if robust_se3_average is not None and len(Ts) >= 3:
+        return robust_se3_average(Ts)
+    return se3_avg_weighted(Ts, ws)
+
+
+def select_best_frame_for_depth(
+    pnp_by_frame: Dict[int, Dict[int, dict]],
+    ref_cam_idx: int,
+) -> Optional[int]:
+    """
+    단일 depth fusion용으로 '잘 맞는' 프레임을 고른다.
+    우선순위:
+    - ref cam 포함
+    - PnP 성공 카메라 수 많음
+    - 사용 마커 수(합) 많음
+    - 평균 reproj 오차 작음
+    - ref cam reproj 오차 작음
+    """
+    best_fid = None
+    best_key = None
+
+    for fid, frame_res in sorted(pnp_by_frame.items()):
+        if len(frame_res) == 0:
+            continue
+        has_ref = 1 if ref_cam_idx in frame_res else 0
+        n_cams = len(frame_res)
+        total_markers = int(sum(len(r.get("used", [])) for r in frame_res.values()))
+        errs = [float(r["reproj"]["err_mean"]) for r in frame_res.values() if "reproj" in r]
+        mean_err = float(np.mean(errs)) if errs else float("inf")
+        ref_err = float(frame_res[ref_cam_idx]["reproj"]["err_mean"]) if has_ref else float("inf")
+
+        # max metrics are positive, min-error metrics are negated
+        key = (
+            has_ref,
+            n_cams,
+            total_markers,
+            -mean_err,
+            -ref_err,
+            -int(fid),  # tie-break: earlier frame preferred
+        )
+        if best_key is None or key > best_key:
+            best_key = key
+            best_fid = int(fid)
+
+    return best_fid
 
 
 def evaluate_cross_reproj_all_frames(
@@ -640,12 +710,18 @@ def main():
 
     parser.add_argument("--use_depth", action="store_true",
                         help="depth 이미지가 있을 때 frame_idx 한 프레임 fusion 수행")
+    parser.add_argument("--auto_best_frame", action="store_true",
+                        help="depth/시각화용 frame_idx를 PnP 품질 기준으로 자동 선택")
+    parser.add_argument("--depth_pose_mode", type=str, default="frame", choices=["global", "frame"],
+                        help="depth ROI/시각화에 사용할 큐브 pose 기준 (default: frame)")
     parser.add_argument("--depth_stride", type=int, default=4,
                         help="depth subsampling stride (default: 4)")
     parser.add_argument("--depth_z_min", type=float, default=0.2,
                         help="depth min range in meters")
     parser.add_argument("--depth_z_max", type=float, default=1.5,
                         help="depth max range in meters")
+    parser.add_argument("--depth_auto_z_window_m", type=float, default=0.12,
+                        help="선택된 큐브 중심 z 기준 +/- window로 depth z-range를 추가로 좁힘 (0=비활성)")
     parser.add_argument("--depth_cube_roi", dest="depth_cube_roi", action="store_true",
                         help="전역 큐브 pose 기준 ROI 박스로 depth를 crop (default: on)")
     parser.add_argument("--no_depth_cube_roi", dest="depth_cube_roi", action="store_false",
@@ -714,6 +790,15 @@ def main():
         cam_indices, pnp_by_frame, T_ref, K_map, D_map, args.ref_cam_idx
     )
 
+    if args.auto_best_frame:
+        best_fid = select_best_frame_for_depth(pnp_by_frame, args.ref_cam_idx)
+        if best_fid is None:
+            print("[WARN] auto_best_frame: suitable frame not found, keeping --frame_idx")
+        else:
+            old_fid = int(args.frame_idx)
+            args.frame_idx = int(best_fid)
+            print(f"[INFO] auto_best_frame: frame_idx {old_fid} -> {args.frame_idx}")
+
     print(f"\n[STEP4-3] 시각화 프레임: {args.frame_idx}")
     pnp_viz = pnp_by_frame.get(args.frame_idx, {})
     if len(pnp_viz) == 0:
@@ -749,9 +834,45 @@ def main():
     )
 
     if args.use_depth:
+        T_cube_depth = T_cube_global
+        if args.depth_pose_mode == "frame":
+            T_frame = estimate_frame_cube_pose(obs_by_frame, args.frame_idx)
+            if T_frame is not None:
+                T_cube_depth = T_frame
+                cdf = T_cube_depth[:3, 3]
+                print(
+                    f"[INFO] Depth pose mode: frame  (cube center z={cdf[2]:.4f}m for frame {args.frame_idx})"
+                )
+            else:
+                print("[WARN] Depth pose mode=frame but frame pose unavailable, fallback to global")
+                cdf = T_cube_depth[:3, 3]
+                print(f"[INFO] Depth pose mode: global (cube center z={cdf[2]:.4f}m)")
+        else:
+            cdf = T_cube_depth[:3, 3]
+            print(f"[INFO] Depth pose mode: global (cube center z={cdf[2]:.4f}m)")
+
         stride = max(1, int(args.depth_stride))
         z_min = float(args.depth_z_min)
         z_max = float(args.depth_z_max)
+        if args.depth_auto_z_window_m > 0:
+            zc = float(T_cube_depth[2, 3])
+            w = float(args.depth_auto_z_window_m)
+            z_min_auto = zc - w
+            z_max_auto = zc + w
+            z_min = max(z_min, z_min_auto)
+            z_max = min(z_max, z_max_auto)
+            print(
+                f"[INFO] Depth z-range: base=({args.depth_z_min:.3f}, {args.depth_z_max:.3f}) "
+                f"auto_centered=({z_min_auto:.3f}, {z_max_auto:.3f}) -> effective=({z_min:.3f}, {z_max:.3f})"
+            )
+        else:
+            print(f"[INFO] Depth z-range: effective=({z_min:.3f}, {z_max:.3f})")
+        if z_max <= z_min:
+            raise RuntimeError(
+                f"Invalid depth z-range after auto-centering: z_min={z_min:.3f}, z_max={z_max:.3f}. "
+                "Adjust --depth_auto_z_window_m or base z range."
+            )
+
         all_pts, all_cols = [], []
         roi_half = None
         if args.depth_cube_roi:
@@ -794,7 +915,7 @@ def main():
             pts_ref = transform_points_rowvec(pts_cam, T_ref[ci])
 
             if args.depth_cube_roi and roi_half is not None:
-                mask = cube_roi_mask_in_ref(pts_ref, T_cube_global, roi_half)
+                mask = cube_roi_mask_in_ref(pts_ref, T_cube_depth, roi_half)
                 kept = int(np.count_nonzero(mask))
                 if kept == 0:
                     print(f"[INFO] cam{ci}: raw={raw_n}  roi=0 (skip)")
@@ -836,7 +957,7 @@ def main():
                 alpha=0.6,
                 linewidths=0,
             )
-            draw_cube_at_T(ax, T_cube_global, cfg, alpha=0.25)
+            draw_cube_at_T(ax, T_cube_depth, cfg, alpha=0.25)
 
             # 카메라 위치 표시
             for i, ci in enumerate(sorted(T_ref.keys())):
