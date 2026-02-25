@@ -63,6 +63,11 @@ def main():
     parser.add_argument("--cooldown_ms", type=int, default=700)
 
     parser.add_argument("--save_depth", action="store_true")
+    parser.add_argument("--no_align_depth_to_color", action="store_true")
+    parser.add_argument("--camera_frame_timeout_ms", type=int, default=2000)
+    parser.add_argument("--log_cam_timeouts", action="store_true")
+    parser.add_argument("--log_cam_errors", action="store_true")
+    parser.add_argument("--log_cam_stats_sec", type=float, default=0.0)
     parser.add_argument("--show", action="store_true")
 
     args = parser.parse_args()
@@ -100,6 +105,12 @@ def main():
     for idx, s in idx_serial_pairs:
         print(f"  cam{idx}: {s}  ({devs.get(s,'?')})")
 
+    if args.save_depth:
+        print(
+            "[INFO] depth align_to_color:",
+            "OFF" if args.no_align_depth_to_color else "ON",
+        )
+
     cams = {}
     for ci, serial in idx_serial_pairs:
         cam = RealSenseCamera(
@@ -109,8 +120,11 @@ def main():
             fps=args.fps,
             use_color=True,
             use_depth=args.save_depth,
-            align_depth_to_color=True,
+            align_depth_to_color=(not args.no_align_depth_to_color),
             warmup_frames=10,
+            frame_timeout_ms=args.camera_frame_timeout_ms,
+            log_timeouts=args.log_cam_timeouts,
+            log_errors=args.log_cam_errors,
         )
         cam.start()
         cams[ci] = cam
@@ -136,6 +150,8 @@ def main():
     event_id = 0
     stable_cnt = {ci: 0 for ci in cams}
     last_save_t = 0.0
+    last_stats_log_t = time.monotonic()
+    prev_cam_stats = {ci: cam.get_stats() for ci, cam in cams.items()}
 
     print("\nControls:")
     print("  SPACE : save once (all cams must satisfy min_markers & stable_frames)")
@@ -184,6 +200,26 @@ def main():
                     txt = f"cam{ci} ok={frames[ci]['ok']} stable={stable_cnt[ci]} ids={frames[ci]['ids']}"
                     cv2.putText(img, txt, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
                     cv2.imshow(f"cam{ci}", img)
+
+            if args.log_cam_stats_sec > 0.0:
+                now_mono = time.monotonic()
+                dt = now_mono - last_stats_log_t
+                if dt >= args.log_cam_stats_sec:
+                    print(f"[CAM_STATS] dt={dt:.2f}s")
+                    for ci in sorted(cams.keys()):
+                        s = cams[ci].get_stats()
+                        p = prev_cam_stats.get(ci, {})
+                        d_frames = int(s["frames_received"]) - int(p.get("frames_received", 0))
+                        d_timeouts = int(s["wait_timeouts"]) - int(p.get("wait_timeouts", 0))
+                        d_errors = int(s["loop_errors"]) - int(p.get("loop_errors", 0))
+                        d_stale = int(s["stale_frames"]) - int(p.get("stale_frames", 0))
+                        fps_est = (d_frames / dt) if dt > 0.0 else 0.0
+                        print(
+                            f"  cam{ci} fps~{fps_est:.1f} (+frames={d_frames}, +timeouts={d_timeouts}, "
+                            f"+errors={d_errors}, +stale={d_stale})"
+                        )
+                        prev_cam_stats[ci] = s
+                    last_stats_log_t = now_mono
 
             key = cv2.waitKey(1) & 0xFF
             now_ms = time.time() * 1000.0
