@@ -26,7 +26,7 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
-# import open3d as o3d  # depth fusion 시에만 필요
+# open3d 는 선택적 의존성; 없어도 PLY 저장 + matplotlib로 대체
 
 from aruco_cube import CubeConfig, ArucoCubeModel, ArucoCubeTarget, rodrigues_to_Rt
 
@@ -555,6 +555,22 @@ def validate_cross_reproj_single_frame(
 # ------------------------------------------------------------------ #
 # depth 관련 함수 (--use_depth 플래그 사용 시에만 호출)
 # ------------------------------------------------------------------ #
+def _save_ply(path: str, points: np.ndarray, colors: np.ndarray) -> None:
+    """Colored point cloud을 ASCII PLY 파일로 저장 (open3d 불필요)."""
+    n = len(points)
+    with open(path, "w") as f:
+        f.write("ply\nformat ascii 1.0\n")
+        f.write(f"element vertex {n}\n")
+        f.write("property float x\nproperty float y\nproperty float z\n")
+        f.write("property uchar red\nproperty uchar green\nproperty uchar blue\n")
+        f.write("end_header\n")
+        rgb_u8 = np.clip(colors * 255.0, 0, 255).astype(np.uint8)
+        for i in range(n):
+            x, y, z = points[i]
+            r, g, b = rgb_u8[i]
+            f.write(f"{x:.6f} {y:.6f} {z:.6f} {r} {g} {b}\n")
+
+
 def depth_to_points_cam(depth_u16, K, depth_scale, z_min, z_max, stride=4):
     fx, fy = K[0, 0], K[1, 1]
     cx, cy = K[0, 2], K[1, 2]
@@ -697,21 +713,24 @@ def main():
     )
 
     if args.use_depth:
-        import open3d as o3d
         stride, z_min, z_max = 4, 0.2, 1.5
         all_pts, all_cols = [], []
 
         for ci in cam_indices:
             if ci not in T_ref:
                 continue
-            rgb_path = os.path.join(args.root_folder, f"cam{ci}", f"rgb_{args.frame_idx:05d}.jpg")
+            rgb_path   = os.path.join(args.root_folder, f"cam{ci}", f"rgb_{args.frame_idx:05d}.jpg")
             depth_path = os.path.join(args.root_folder, f"cam{ci}", f"depth_{args.frame_idx:05d}.png")
             if not (os.path.exists(rgb_path) and os.path.exists(depth_path)):
                 print(f"[WARN] depth 없음: cam{ci} frame {args.frame_idx} (skip)")
                 continue
 
-            rgb_bgr = cv2.imread(rgb_path, cv2.IMREAD_COLOR)
+            rgb_bgr   = cv2.imread(rgb_path, cv2.IMREAD_COLOR)
             depth_u16 = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED)
+            if rgb_bgr is None or depth_u16 is None:
+                print(f"[WARN] 이미지 로드 실패: cam{ci} frame {args.frame_idx} (skip)")
+                continue
+
             rgb = cv2.cvtColor(rgb_bgr, cv2.COLOR_BGR2RGB).astype(np.float64) / 255.0
             _, _, ds = load_intrinsics_cam_npz(args.intrinsics_dir, ci)
             if ds is None or np.isnan(ds):
@@ -721,19 +740,68 @@ def main():
             if pts_cam.shape[0] == 0:
                 continue
             pts_ref = transform_points_rowvec(pts_cam, T_ref[ci])
-            cols = np.array([rgb[v, u] for (v, u) in pix], dtype=np.float64)
+            cols    = np.array([rgb[v, u] for (v, u) in pix], dtype=np.float64)
             all_pts.append(pts_ref)
             all_cols.append(cols)
-            print(f"[INFO] cam{ci}: {pts_ref.shape[0]} points")
+            print(f"[INFO] cam{ci}: {pts_ref.shape[0]} points fused")
 
         if all_pts:
             P = np.concatenate(all_pts, axis=0)
             C = np.concatenate(all_cols, axis=0)
-            fused = o3d.geometry.PointCloud()
-            fused.points = o3d.utility.Vector3dVector(P)
-            fused.colors = o3d.utility.Vector3dVector(C)
-            axis = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1)
-            o3d.visualization.draw_geometries([axis, fused])
+            print(f"[INFO] 전체 fused points: {len(P)}")
+
+            # ── PLY 저장 (open3d 불필요) ──────────────────────────────
+            ply_path = os.path.join(
+                args.root_folder,
+                f"depth_fusion_frame{args.frame_idx:05d}.ply",
+            )
+            _save_ply(ply_path, P, C)
+            print(f"[SAVE] {ply_path}")
+
+            # ── matplotlib 3D 산점도 시각화 ───────────────────────────
+            fig = plt.figure(figsize=(11, 8))
+            ax  = fig.add_subplot(111, projection="3d")
+
+            vis_stride = max(1, len(P) // 8000)   # 최대 8000점 표시
+            ax.scatter(
+                P[::vis_stride, 0],
+                P[::vis_stride, 1],
+                P[::vis_stride, 2],
+                c=C[::vis_stride],
+                s=1,
+                alpha=0.6,
+                linewidths=0,
+            )
+            draw_cube_at_T(ax, T_cube_global, cfg, alpha=0.25)
+
+            # 카메라 위치 표시
+            for i, ci in enumerate(sorted(T_ref.keys())):
+                cam_pos = np.zeros(3) if ci == args.ref_cam_idx else T_ref[ci][:3, 3]
+                ax.scatter(*cam_pos, c=CAM_COLORS_MPL[i % len(CAM_COLORS_MPL)],
+                           s=120, marker="^", edgecolors="k", zorder=8)
+                ax.text(*cam_pos, f" cam{ci}", fontsize=8,
+                        color=CAM_COLORS_MPL[i % len(CAM_COLORS_MPL)])
+
+            ax.set_xlabel("X (m)")
+            ax.set_ylabel("Y (m)")
+            ax.set_zlabel("Z (m)")
+            ax.set_title(
+                f"Depth Fusion – ref cam{args.ref_cam_idx}, frame {args.frame_idx}\n"
+                f"{len(P)} points total  (PLY saved: {os.path.basename(ply_path)})",
+                fontsize=9,
+            )
+            ax.set_box_aspect([1, 1, 1])
+            plt.tight_layout()
+            if args.save_overlay:
+                fig_path = os.path.join(
+                    args.root_folder,
+                    f"depth_fusion_frame{args.frame_idx:05d}.png",
+                )
+                plt.savefig(fig_path, dpi=150, bbox_inches="tight")
+                print(f"[SAVE] {fig_path}")
+            plt.show()
+        else:
+            print("[WARN] depth fusion: 유효 점 없음 (depth 이미지 확인 또는 --save_depth 재캡처 필요)")
 
     print("[INFO] Step4 finished.")
 

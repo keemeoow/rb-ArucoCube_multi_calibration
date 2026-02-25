@@ -418,6 +418,188 @@ class ArucoCubeTarget:
             return ok_final, chosen_sol["rvec"], chosen_sol["tvec"], chosen_used, reproj
         return ok_final, chosen_sol["rvec"], chosen_sol["tvec"], chosen_used
 
+    # ------------------------------------------------------------------ #
+    # Depth support
+    # ------------------------------------------------------------------ #
+
+    def sample_depth_at_corners(
+        self,
+        depth_u16: np.ndarray,
+        depth_scale: float,
+        corners_list: List[np.ndarray],
+        ids: np.ndarray,
+        radius: int = 2,
+    ) -> Dict[int, np.ndarray]:
+        """
+        감지된 마커 코너 위치에서 depth 값(m)을 샘플링한다.
+
+        Args:
+            depth_u16:   uint16 depth 이미지 (H, W) - align_depth_to_color 적용 후
+            depth_scale: depth scale (m/unit), intrinsics npz의 depth_scale_m_per_unit
+            corners_list, ids: cube.detect() 반환값
+            radius:      코너 주변 패치 반경(px), median 사용
+
+        Returns:
+            {marker_id: (4,) float64 depth_m array,  NaN = 유효 depth 없음}
+        """
+        h, w = depth_u16.shape[:2]
+        result: Dict[int, np.ndarray] = {}
+
+        for c, mid in zip(corners_list, ids):
+            mid = int(mid)
+            if mid not in self.cfg.id_to_face:
+                continue
+            corners_px = c.reshape(4, 2)
+            depths = []
+            for (u, v) in corners_px:
+                r0 = max(0, int(v) - radius)
+                r1 = min(h, int(v) + radius + 1)
+                c0 = max(0, int(u) - radius)
+                c1 = min(w, int(u) + radius + 1)
+                patch = depth_u16[r0:r1, c0:c1].astype(np.float64)
+                valid = patch[patch > 0]
+                if valid.size:
+                    depths.append(float(np.median(valid)) * float(depth_scale))
+                else:
+                    depths.append(float("nan"))
+            result[mid] = np.array(depths, dtype=np.float64)
+
+        return result
+
+    def get_3d_correspondences_from_depth(
+        self,
+        depth_u16: np.ndarray,
+        depth_scale: float,
+        corners_list: List[np.ndarray],
+        ids: np.ndarray,
+        K: np.ndarray,
+        radius: int = 2,
+        min_valid_per_marker: int = 3,
+    ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], List[int]]:
+        """
+        depth backprojection으로 마커 코너의 3D 좌표(카메라 프레임)를 계산하고,
+        rig 프레임 기준 3D 좌표와 대응점 쌍을 반환한다.
+
+        Returns:
+            obj_pts:  (N, 3) rig/object 프레임 3D 점
+            cam_pts:  (N, 3) 카메라 프레임 3D 점 (depth backprojection)
+            used_ids: 유효 depth 코너가 min_valid_per_marker 이상인 marker id 목록
+        """
+        fx, fy = float(K[0, 0]), float(K[1, 1])
+        cx, cy = float(K[0, 2]), float(K[1, 2])
+        h, w = depth_u16.shape[:2]
+        obj_list: List[np.ndarray] = []
+        cam_list: List[List[float]] = []
+        used_ids: List[int] = []
+
+        for c, mid in zip(corners_list, ids):
+            mid = int(mid)
+            if mid not in self.cfg.id_to_face:
+                continue
+            obj_corners = self.model.marker_corners_in_rig(mid)  # (4, 3)
+            img_corners = c.reshape(4, 2)
+
+            valid_obj: List[np.ndarray] = []
+            valid_cam: List[List[float]] = []
+
+            for i, (u, v) in enumerate(img_corners):
+                r0 = max(0, int(v) - radius)
+                r1 = min(h, int(v) + radius + 1)
+                c0 = max(0, int(u) - radius)
+                c1 = min(w, int(u) + radius + 1)
+                patch = depth_u16[r0:r1, c0:c1].astype(np.float64)
+                valid = patch[patch > 0]
+                if not valid.size:
+                    continue
+                z = float(np.median(valid)) * float(depth_scale)
+                x = (float(u) - cx) * z / fx
+                y = (float(v) - cy) * z / fy
+                valid_obj.append(obj_corners[i])
+                valid_cam.append([x, y, z])
+
+            if len(valid_cam) >= int(min_valid_per_marker):
+                obj_list.extend(valid_obj)
+                cam_list.extend(valid_cam)
+                used_ids.append(mid)
+
+        if len(cam_list) < 3:
+            return None, None, []
+
+        return (
+            np.array(obj_list, dtype=np.float64),
+            np.array(cam_list, dtype=np.float64),
+            used_ids,
+        )
+
+    @staticmethod
+    def _kabsch_svd(
+        obj_pts: np.ndarray,
+        cam_pts: np.ndarray,
+    ) -> Optional[np.ndarray]:
+        """
+        Kabsch / Umeyama SVD로 3D-3D 대응점에서 rigid transform T_C_O (4x4) 계산.
+
+        cam_pts ≈ R @ obj_pts + t  (column-vector convention)
+
+        Args:
+            obj_pts: (N, 3) rig 프레임 점
+            cam_pts: (N, 3) 카메라 프레임 점
+        Returns:
+            T_C_O (4x4 float64) or None (수치 오류)
+        """
+        if len(obj_pts) < 3:
+            return None
+        mu_o = obj_pts.mean(axis=0)
+        mu_c = cam_pts.mean(axis=0)
+        A = (obj_pts - mu_o).T @ (cam_pts - mu_c)  # (3, 3)
+        U, _, Vt = np.linalg.svd(A)
+        d = np.sign(np.linalg.det(Vt.T @ U.T))
+        D = np.diag([1.0, 1.0, float(d)])
+        R = Vt.T @ D @ U.T
+        t = mu_c - R @ mu_o
+        T = np.eye(4, dtype=np.float64)
+        T[:3, :3] = R
+        T[:3, 3] = t
+        return T
+
+    def solve_pose_from_depth(
+        self,
+        bgr: np.ndarray,
+        depth_u16: np.ndarray,
+        depth_scale: float,
+        K: np.ndarray,
+        D: np.ndarray,
+        min_valid_pts: int = 6,
+        radius: int = 2,
+    ) -> Tuple[bool, Optional[np.ndarray], Optional[np.ndarray], List[int], str]:
+        """
+        depth backprojection + Kabsch SVD로 큐브 pose 추정.
+        유효 depth 점 부족 시 일반 PnP fallback.
+
+        Returns:
+            (ok, rvec, tvec, used_ids, method)
+            method: "depth_svd" | "pnp_fallback" | "no_markers"
+        """
+        corners_list, ids = self.detect(bgr)
+        if ids is None:
+            return False, None, None, [], "no_markers"
+
+        obj_pts, cam_pts, used_ids = self.get_3d_correspondences_from_depth(
+            depth_u16, depth_scale, corners_list, ids, K, radius=radius
+        )
+
+        if obj_pts is not None and len(obj_pts) >= int(min_valid_pts):
+            T = self._kabsch_svd(obj_pts, cam_pts)
+            if T is not None and float(T[2, 3]) > 0.0:
+                R = T[:3, :3]
+                t = T[:3, 3]
+                rvec, _ = cv2.Rodrigues(R)
+                return True, rvec, t.reshape(3, 1), used_ids, "depth_svd"
+
+        # fallback
+        ok, rvec, tvec, used = self.solve_pnp_cube(bgr, K, D, min_markers=1)
+        return ok, rvec, tvec, used, "pnp_fallback"
+
     def project_all_markers(self, rvec, tvec, K, D) -> Dict[int, np.ndarray]:
         """
         PnP로 구한 큐브 pose(rvec, tvec)를 이용해
