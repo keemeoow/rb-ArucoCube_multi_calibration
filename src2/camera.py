@@ -59,10 +59,23 @@ class RealSenseCamera:
 
     def start(self):
         self.pipeline.start(self.cfg)
-        time.sleep(3.0)
+        time.sleep(5.0)  # depth+color 복합 스트림 초기화 여유
 
-        for _ in range(self.warmup_frames):
-            self.pipeline.wait_for_frames(timeout_ms=10000)
+        arrived = 0
+        for attempt in range(self.warmup_frames * 2):
+            try:
+                self.pipeline.wait_for_frames(timeout_ms=30000)
+                arrived += 1
+                if arrived >= self.warmup_frames:
+                    break
+            except Exception as e:
+                print(f"[WARN] serial={self.serial} warmup {attempt+1}: {e}")
+
+        if arrived == 0:
+            raise RuntimeError(
+                f"Camera serial={self.serial}: 프레임이 도착하지 않았습니다. "
+                "카메라를 재연결 후 재시도하세요."
+            )
 
         self._running = True
         self._thread = threading.Thread(target=self._loop, daemon=True)
