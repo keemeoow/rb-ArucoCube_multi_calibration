@@ -19,10 +19,13 @@ class RealSenseCamera:
         align_depth_to_color: bool = True,
         warmup_frames: int = 10,
         frame_timeout_ms: int = 2000,
-        warmup_timeout_ms: int = 30000,
+        warmup_timeout_ms: int = 2000,
         log_timeouts: bool = False,
         log_errors: bool = False,
         log_throttle_sec: float = 2.0,
+        start_retries: int = 2,
+        reset_on_start_failure: bool = True,
+        startup_settle_sec: float = 1.0,
     ):
         self.serial = serial
         self.width = int(width)
@@ -37,15 +40,13 @@ class RealSenseCamera:
         self.log_timeouts = bool(log_timeouts)
         self.log_errors = bool(log_errors)
         self.log_throttle_sec = float(log_throttle_sec)
+        self.start_retries = int(start_retries)
+        self.reset_on_start_failure = bool(reset_on_start_failure)
+        self.startup_settle_sec = float(startup_settle_sec)
 
-        self.pipeline = rs.pipeline()
-        self.cfg = rs.config()
-        self.cfg.enable_device(self.serial)
-
-        if self.use_color:
-            self.cfg.enable_stream(rs.stream.color, self.width, self.height, rs.format.bgr8, self.fps)
-        if self.use_depth:
-            self.cfg.enable_stream(rs.stream.depth, self.width, self.height, rs.format.z16, self.fps)
+        self.pipeline = None
+        self.cfg = None
+        self._build_pipeline_config()
 
         self.align = rs.align(rs.stream.color) if (self.use_depth and self.align_depth_to_color and self.use_color) else None
 
@@ -66,6 +67,16 @@ class RealSenseCamera:
         self._last_error_wall_ms = None
         self._last_log_mono = 0.0
 
+    def _build_pipeline_config(self):
+        self.pipeline = rs.pipeline()
+        self.cfg = rs.config()
+        self.cfg.enable_device(self.serial)
+
+        if self.use_color:
+            self.cfg.enable_stream(rs.stream.color, self.width, self.height, rs.format.bgr8, self.fps)
+        if self.use_depth:
+            self.cfg.enable_stream(rs.stream.depth, self.width, self.height, rs.format.z16, self.fps)
+
     @staticmethod
     def list_devices() -> Dict[str, str]:
         ctx = rs.context()
@@ -76,25 +87,99 @@ class RealSenseCamera:
             out[serial] = name
         return out
 
-    def start(self):
-        self.pipeline.start(self.cfg)
-        time.sleep(5.0)  # depth+color 복합 스트림 초기화 여유
+    @staticmethod
+    def probe_device_info(serial: str) -> Dict[str, str]:
+        ctx = rs.context()
+        for dev in ctx.query_devices():
+            s = dev.get_info(rs.camera_info.serial_number)
+            if s != str(serial):
+                continue
+            info = {
+                "serial": s,
+                "name": dev.get_info(rs.camera_info.name),
+            }
+            try:
+                info["usb_type"] = dev.get_info(rs.camera_info.usb_type_descriptor)
+            except Exception:
+                info["usb_type"] = "unknown"
+            try:
+                info["product_line"] = dev.get_info(rs.camera_info.product_line)
+            except Exception:
+                info["product_line"] = "unknown"
+            return info
+        return {"serial": str(serial), "name": "unknown", "usb_type": "unknown", "product_line": "unknown"}
 
+    def _hardware_reset(self) -> bool:
+        try:
+            ctx = rs.context()
+            for dev in ctx.query_devices():
+                if dev.get_info(rs.camera_info.serial_number) == self.serial:
+                    dev.hardware_reset()
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def _warmup(self):
         arrived = 0
-        for attempt in range(self.warmup_frames * 2):
+        max_attempts = max(self.warmup_frames * 3, self.warmup_frames + 2)
+        for attempt in range(max_attempts):
             try:
                 self.pipeline.wait_for_frames(timeout_ms=self.warmup_timeout_ms)
                 arrived += 1
                 if arrived >= self.warmup_frames:
-                    break
+                    return
             except Exception as e:
-                print(f"[WARN] serial={self.serial} warmup {attempt+1}: {e}")
+                print(f"[WARN] serial={self.serial} warmup {attempt+1}/{max_attempts}: {e}")
+        raise RuntimeError(
+            f"Camera serial={self.serial}: warmup failed "
+            f"(requested {self.warmup_frames} frames, got {arrived})."
+        )
 
-        if arrived == 0:
+    def start(self):
+        last_exc = None
+        n_tries = max(1, self.start_retries + 1)
+        dev_info = self.probe_device_info(self.serial)
+        print(
+            f"[INFO] starting serial={self.serial} "
+            f"name={dev_info.get('name','?')} usb={dev_info.get('usb_type','unknown')}"
+        )
+
+        for start_try in range(1, n_tries + 1):
+            try:
+                # Previous failure may have invalidated the pipeline/device handle.
+                self._build_pipeline_config()
+                self.pipeline.start(self.cfg)
+                if self.startup_settle_sec > 0:
+                    time.sleep(self.startup_settle_sec)
+                self._warmup()
+                last_exc = None
+                break
+            except Exception as e:
+                last_exc = e
+                print(f"[WARN] serial={self.serial} start attempt {start_try}/{n_tries} failed: {e}")
+                try:
+                    self.pipeline.stop()
+                except Exception:
+                    pass
+
+                if start_try < n_tries and self.reset_on_start_failure:
+                    did_reset = self._hardware_reset()
+                    print(
+                        f"[INFO] serial={self.serial} hardware_reset "
+                        f"{'issued' if did_reset else 'skipped'} before retry"
+                    )
+                    # Device re-enumeration after hardware reset takes time.
+                    time.sleep(3.0 if did_reset else 1.0)
+                elif start_try < n_tries:
+                    time.sleep(1.0)
+
+        if last_exc is not None:
             raise RuntimeError(
-                f"Camera serial={self.serial}: 프레임이 도착하지 않았습니다. "
-                "카메라를 재연결 후 재시도하세요."
-            )
+                f"Camera serial={self.serial}: start/warmup failed after {n_tries} attempts. "
+                f"usb={dev_info.get('usb_type','unknown')}, depth={self.use_depth}, "
+                f"profile={self.width}x{self.height}@{self.fps}. Last error: {last_exc}"
+            ) from last_exc
 
         self._running = True
         self._thread = threading.Thread(target=self._loop, daemon=True)
