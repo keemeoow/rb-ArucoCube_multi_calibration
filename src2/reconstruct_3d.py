@@ -4,19 +4,23 @@
 #
 # 사용법 (capture_rgbd_3cam.py로 촬영한 데이터 기준):
 #
-#   # 단일 프레임 복원
-#   python reconstruct_3d.py \
-#     --capture_dir ./data/rgbd_capture \
-#     --intrinsics_dir ./intrinsics \
-#     --calib_dir ./data/cube_session_01/calib_out_cube \
-#     --frame 0
+"""
+단일 프레임 복원
+python reconstruct_3d.py \
+    --capture_dir ./data/rgbd_capture \
+    --intrinsics_dir ./intrinsics \
+    --calib_dir ./data/cube_session_01/calib_out_cube \
+    --frame 0
+"""
 #
-#   # 모든 프레임 각각 개별 PLY로 저장 (물체마다 다를 때)
-#   python reconstruct_3d.py \
-#     --capture_dir ./data/rgbd_capture \
-#     --intrinsics_dir ./intrinsics \
-#     --calib_dir ./data/cube_session_01/calib_out_cube \
-#     --each_frame --no_plot
+"""
+모든 프레임 각각 개별 PLY로 저장 (물체마다 다를 때)
+python reconstruct_3d.py \
+    --capture_dir ./data/rgbd_capture \
+    --intrinsics_dir ./intrinsics \
+    --calib_dir ./data/cube_session_01/calib_out_cube \
+    --each_frame --no_plot
+"""
 #
 #   # 전체 프레임 하나로 합치기 (같은 물체를 여러 번 찍었을 때)
 #   python reconstruct_3d.py \
@@ -25,12 +29,14 @@
 #     --calib_dir ./data/cube_session_01/calib_out_cube \
 #     --all_frames --voxel_mm 2
 #
-#   # Open3D 뷰어로 보기
-#   python reconstruct_3d.py \
-#     --capture_dir ./data/rgbd_capture \
-#     --intrinsics_dir ./intrinsics \
-#     --calib_dir ./data/cube_session_01/calib_out_cube \
-#     --frame 0 --open3d
+"""
+Open3D 뷰어로 보기
+python reconstruct_3d.py \
+    --capture_dir ./data/rgbd_capture \
+    --intrinsics_dir ./intrinsics \
+    --calib_dir ./data/cube_session_01/calib_out_cube \
+    --frame 0 --open3d
+"""
 
 import os
 import glob
