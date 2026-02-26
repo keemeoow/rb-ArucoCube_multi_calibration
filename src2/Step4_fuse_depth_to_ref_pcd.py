@@ -28,7 +28,7 @@ python Step4_fuse_depth_to_ref_pcd.py \
   --use_depth \
   --save_overlay \
   --depth_pose_mode frame \
-  --depth_dense_no_roi
+  --depth_dense_no_roi \
   --depth_vis_max_points 120000
 """
 """
