@@ -16,7 +16,7 @@ python reconstruct_3d.py \
 """
 모든 프레임 각각 개별 PLY로 저장 (물체마다 다를 때)
 python reconstruct_3d.py \
-    --capture_dir ./data/rgbd_capture \
+    --capture_dir ./data/rgbd_capture 
     --intrinsics_dir ./intrinsics \
     --calib_dir ./data/cube_session_01/calib_out_cube \
     --each_frame --no_plot
@@ -124,7 +124,7 @@ def _detect_zero_padding(capture_dir: str, cam_idx: int) -> int:
 # 3D reconstruction core
 # ──────────────────────────────────────────────────
 def depth_to_points(depth_u16: np.ndarray, K: np.ndarray, depth_scale: float,
-                    z_min: float, z_max: float, stride: int = 2
+                    z_min: float, z_max: float, stride: int = 1
                     ) -> Tuple[np.ndarray, np.ndarray]:
     """
     depth 이미지 → camera frame 3D 점 + 픽셀 좌표(v, u).
@@ -294,16 +294,16 @@ def main():
     parser.add_argument("--capture_dir", required=True, help="capture_rgbd_3cam.py 저장 폴더")
     parser.add_argument("--intrinsics_dir", default="./intrinsics", help="intrinsics 폴더")
     parser.add_argument("--calib_dir", required=True, help="T_C0_Ci.npy 가 있는 캘리브레이션 폴더")
-    parser.add_argument("--ref_cam", type=int, default=0, help="기준 카메라 인덱스 (default: 0)")
+    parser.add_argument("--ref_cam", type=int, default=1, help="기준 카메라 인덱스 (default: 0)")
 
     parser.add_argument("--frame", type=int, default=None, help="특정 프레임만 복원 (기본: 첫 번째)")
     parser.add_argument("--each_frame", action="store_true", help="모든 프레임을 각각 개별 PLY로 저장 (다른 물체들)")
     parser.add_argument("--all_frames", action="store_true", help="모든 프레임을 하나로 합치기 (같은 물체)")
     parser.add_argument("--frame_skip", type=int, default=1, help="each_frame/all_frames 시 N번째마다 사용")
 
-    parser.add_argument("--z_min", type=float, default=0.15, help="depth 최소 거리 (m)")
-    parser.add_argument("--z_max", type=float, default=1.5, help="depth 최대 거리 (m)")
-    parser.add_argument("--stride", type=int, default=2, help="depth subsampling (1=dense, 4=sparse)")
+    parser.add_argument("--z_min", type=float, default=0.1, help="depth 최소 거리 (m)")
+    parser.add_argument("--z_max", type=float, default=0.5, help="depth 최대 거리 (m)")
+    parser.add_argument("--stride", type=int, default=1, help="depth subsampling (1=dense, 4=sparse)")
     parser.add_argument("--voxel_mm", type=float, default=0.0, help="voxel downsample 크기 (mm), 0=OFF")
 
     parser.add_argument("--out", type=str, default=None, help="PLY 출력 경로 (기본: capture_dir 내)")
