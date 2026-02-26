@@ -4,13 +4,21 @@
 #
 # 사용법 (capture_rgbd_3cam.py로 촬영한 데이터 기준):
 #
+#   # 단일 프레임 복원
 #   python reconstruct_3d.py \
 #     --capture_dir ./data/rgbd_capture \
 #     --intrinsics_dir ./intrinsics \
 #     --calib_dir ./data/cube_session_01/calib_out_cube \
 #     --frame 0
 #
-#   # 전체 프레임 합치기
+#   # 모든 프레임 각각 개별 PLY로 저장 (물체마다 다를 때)
+#   python reconstruct_3d.py \
+#     --capture_dir ./data/rgbd_capture \
+#     --intrinsics_dir ./intrinsics \
+#     --calib_dir ./data/cube_session_01/calib_out_cube \
+#     --each_frame --no_plot
+#
+#   # 전체 프레임 하나로 합치기 (같은 물체를 여러 번 찍었을 때)
 #   python reconstruct_3d.py \
 #     --capture_dir ./data/rgbd_capture \
 #     --intrinsics_dir ./intrinsics \
@@ -283,8 +291,9 @@ def main():
     parser.add_argument("--ref_cam", type=int, default=0, help="기준 카메라 인덱스 (default: 0)")
 
     parser.add_argument("--frame", type=int, default=None, help="특정 프레임만 복원 (기본: 첫 번째)")
-    parser.add_argument("--all_frames", action="store_true", help="모든 프레임 합치기")
-    parser.add_argument("--frame_skip", type=int, default=1, help="all_frames 시 N번째마다 사용")
+    parser.add_argument("--each_frame", action="store_true", help="모든 프레임을 각각 개별 PLY로 저장 (다른 물체들)")
+    parser.add_argument("--all_frames", action="store_true", help="모든 프레임을 하나로 합치기 (같은 물체)")
+    parser.add_argument("--frame_skip", type=int, default=1, help="each_frame/all_frames 시 N번째마다 사용")
 
     parser.add_argument("--z_min", type=float, default=0.15, help="depth 최소 거리 (m)")
     parser.add_argument("--z_max", type=float, default=1.5, help="depth 최대 거리 (m)")
@@ -316,7 +325,52 @@ def main():
     pad = _detect_zero_padding(args.capture_dir, cam_indices[0])
     print(f"[INFO] 파일명 zero-padding: {pad}자리")
 
-    # --- select frames ---
+    # --- output directory ---
+    out_dir = os.path.join(args.capture_dir, "ply")
+    os.makedirs(out_dir, exist_ok=True)
+
+    # ============================================================
+    # --each_frame : 프레임별 개별 PLY 저장 (각각 다른 물체)
+    # ============================================================
+    if args.each_frame:
+        target_frames = frame_ids[::args.frame_skip]
+        print(f"\n[BATCH] 프레임별 개별 PLY 저장: {len(target_frames)}장")
+        print(f"[BATCH] 출력 폴더: {os.path.abspath(out_dir)}\n")
+
+        success, fail = 0, 0
+        for i, fid in enumerate(target_frames):
+            fmt_str = f"{{:0{pad}d}}".format(fid)
+            print(f"[{i+1}/{len(target_frames)}] frame {fid}:")
+            f_pts, f_cols = fuse_frame(
+                args.capture_dir, fid, cam_indices, T_ref, K_map, ds_map,
+                args.z_min, args.z_max, args.stride, pad,
+            )
+            if not f_pts:
+                print(f"  -> SKIP (유효 점 없음)\n")
+                fail += 1
+                continue
+
+            P = np.concatenate(f_pts, axis=0)
+            C = np.concatenate(f_cols, axis=0)
+
+            if args.voxel_mm > 0:
+                n_before = len(P)
+                P, C = voxel_downsample(P, C, args.voxel_mm / 1000.0)
+                print(f"  voxel {args.voxel_mm:.1f}mm: {n_before:,} -> {len(P):,}")
+
+            ply_name = f"frame_{fid:0{pad}d}.ply"
+            ply_path = os.path.join(out_dir, ply_name)
+            save_ply(ply_path, P, C)
+            success += 1
+            print()
+
+        print(f"[BATCH 완료] 성공: {success}  실패: {fail}  총: {len(target_frames)}")
+        print(f"[BATCH 결과] {os.path.abspath(out_dir)}/")
+        return
+
+    # ============================================================
+    # --all_frames : 전체 프레임을 하나로 합치기 (같은 물체)
+    # ============================================================
     if args.all_frames:
         target_frames = frame_ids[::args.frame_skip]
         print(f"\n[FUSE] 전체 프레임 합치기: {len(target_frames)}장 (skip={args.frame_skip})")
@@ -357,10 +411,9 @@ def main():
         ply_path = args.out
     else:
         if args.all_frames:
-            ply_path = os.path.join(args.capture_dir, "reconstruction_all.ply")
+            ply_path = os.path.join(out_dir, "reconstruction_all.ply")
         else:
-            ply_path = os.path.join(args.capture_dir, f"reconstruction_frame{target_frames[0]:06d}.ply")
-    os.makedirs(os.path.dirname(os.path.abspath(ply_path)), exist_ok=True)
+            ply_path = os.path.join(out_dir, f"reconstruction_frame{target_frames[0]:06d}.ply")
     save_ply(ply_path, P, C)
 
     # --- visualize ---
