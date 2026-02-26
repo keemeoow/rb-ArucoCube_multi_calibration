@@ -1,7 +1,7 @@
 # Step4_fuse_depth_to_ref_pcd.py
 # 전체 프레임 기반 검증/통합 + 단일 프레임 시각화
 """
-******** 결과만 잘나오게
+[결과만 잘나오게]
 python Step4_fuse_depth_to_ref_pcd.py \
   --root_folder ./data/cube_session_01 \
   --intrinsics_dir ./intrinsics \
@@ -16,6 +16,20 @@ python Step4_fuse_depth_to_ref_pcd.py \
   --depth_z_max 1.5 \
   --depth_auto_z_window_m 0.10 \
   --depth_stride 2
+"""
+"""
+[roi 없이]
+python Step4_fuse_depth_to_ref_pcd.py \
+  --root_folder ./data/cube_session_01 \
+  --intrinsics_dir ./intrinsics \
+  --ref_cam_idx 0 \
+  --frame_idx 0 \
+  --auto_best_frame \
+  --use_depth \
+  --save_overlay \
+  --depth_pose_mode frame \
+  --depth_dense_no_roi
+  --depth_vis_max_points 120000
 """
 """
 python Step4_fuse_depth_to_ref_pcd.py \
@@ -712,6 +726,8 @@ def main():
                         help="depth 이미지가 있을 때 frame_idx 한 프레임 fusion 수행")
     parser.add_argument("--auto_best_frame", action="store_true",
                         help="depth/시각화용 frame_idx를 PnP 품질 기준으로 자동 선택")
+    parser.add_argument("--depth_dense_no_roi", action="store_true",
+                        help="결과를 빽빽하게 보기 위한 프리셋: ROI OFF + stride=1 + auto-z-window OFF + vis points 증가")
     parser.add_argument("--depth_pose_mode", type=str, default="frame", choices=["global", "frame"],
                         help="depth ROI/시각화에 사용할 큐브 pose 기준 (default: frame)")
     parser.add_argument("--depth_stride", type=int, default=4,
@@ -728,8 +744,22 @@ def main():
                         help="큐브 ROI crop 비활성화 (기존 동작)")
     parser.add_argument("--depth_cube_roi_margin_m", type=float, default=0.06,
                         help="큐브 반경계에 추가할 ROI margin (m), default=0.06")
+    parser.add_argument("--depth_vis_max_points", type=int, default=8000,
+                        help="depth PNG 시각화 시 표시할 최대 점 수 (PLY 저장 점 수와는 별개)")
     parser.set_defaults(depth_cube_roi=True)
     args = parser.parse_args()
+
+    if args.depth_dense_no_roi:
+        args.depth_cube_roi = False
+        args.depth_stride = 1
+        args.depth_auto_z_window_m = 0.0
+        if args.depth_vis_max_points == 8000:
+            args.depth_vis_max_points = 50000
+        print(
+            "[INFO] depth_dense_no_roi preset applied: "
+            "depth_cube_roi=OFF, depth_stride=1, depth_auto_z_window_m=0, "
+            f"depth_vis_max_points={args.depth_vis_max_points}"
+        )
 
     try:
         _, map_path = load_device_map(args.intrinsics_dir)
@@ -947,7 +977,8 @@ def main():
             fig = plt.figure(figsize=(11, 8))
             ax  = fig.add_subplot(111, projection="3d")
 
-            vis_stride = max(1, len(P) // 8000)   # 최대 8000점 표시
+            max_vis_points = max(1, int(args.depth_vis_max_points))
+            vis_stride = max(1, len(P) // max_vis_points)
             ax.scatter(
                 P[::vis_stride, 0],
                 P[::vis_stride, 1],
