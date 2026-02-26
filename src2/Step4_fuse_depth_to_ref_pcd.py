@@ -1,7 +1,7 @@
 # Step4_fuse_depth_to_ref_pcd.py
 # 전체 프레임 기반 검증/통합 + 단일 프레임 시각화
 """
-******** 결과 잘나오게
+******** 결과만 잘나오게
 python Step4_fuse_depth_to_ref_pcd.py \
   --root_folder ./data/cube_session_01 \
   --intrinsics_dir ./intrinsics \
