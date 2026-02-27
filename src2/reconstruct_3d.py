@@ -369,7 +369,7 @@ def main():
     parser.add_argument("--capture_dir", required=True, help="capture_rgbd_3cam.py 저장 폴더")
     parser.add_argument("--intrinsics_dir", default="./intrinsics", help="intrinsics 폴더")
     parser.add_argument("--calib_dir", required=True, help="T_C0_Ci.npy 가 있는 캘리브레이션 폴더")
-    parser.add_argument("--ref_cam", type=int, default=1, help="기준 카메라 인덱스 (default: 0)")
+    parser.add_argument("--ref_cam", type=int, default=0, help="기준 카메라 인덱스 (default: 0)")
 
     parser.add_argument("--frame", type=int, default=None, help="특정 프레임만 복원 (기본: 첫 번째)")
     parser.add_argument("--each_frame", action="store_true", help="모든 프레임을 각각 개별 PLY로 저장 (다른 물체들)")
