@@ -308,18 +308,46 @@ def remove_background_plane(points: np.ndarray, colors: np.ndarray,
         return points, colors
 
 
+def _build_pcd_with_color(capture_dir, cam_idx, frame_ids, K, D, ds,
+                           z_min, z_max, pad, stride=2):
+    """프레임들을 모아 colored point cloud 생성 (ICP용)."""
+    fmt = f"{{:0{pad}d}}"
+    all_pts, all_cols = [], []
+    for fid in frame_ids:
+        fid_str = fmt.format(fid)
+        rgb_path = os.path.join(capture_dir, f"cam{cam_idx}", f"rgb_{fid_str}.jpg")
+        depth_path = os.path.join(capture_dir, f"cam{cam_idx}", f"depth_{fid_str}.png")
+        if not (os.path.exists(rgb_path) and os.path.exists(depth_path)):
+            continue
+        rgb_bgr = cv2.imread(rgb_path, cv2.IMREAD_COLOR)
+        depth_u16 = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED)
+        if rgb_bgr is None or depth_u16 is None:
+            continue
+        rgb = cv2.cvtColor(rgb_bgr, cv2.COLOR_BGR2RGB).astype(np.float64) / 255.0
+        pts, pixels = depth_to_points(depth_u16, K, D, ds, z_min, z_max,
+                                      stride=stride, undistort=True)
+        if pts.shape[0] < 100:
+            continue
+        cols = rgb[pixels[:, 0], pixels[:, 1]]
+        all_pts.append(pts)
+        all_cols.append(cols)
+    if not all_pts:
+        return None, None
+    return np.concatenate(all_pts), np.concatenate(all_cols)
+
+
 def refine_extrinsics_icp(
     capture_dir: str, frame_ids: List[int], cam_indices: List[int],
     T_ref: Dict[int, np.ndarray], K_map: Dict[int, np.ndarray],
     D_map: Dict[int, np.ndarray], ds_map: Dict[int, float],
     ref_idx: int, z_min: float, z_max: float, pad: int,
-    max_correspondence_dist: float = 0.01,
+    max_correspondence_dist: float = 0.02,
     n_sample_frames: int = 5,
 ) -> Dict[int, np.ndarray]:
     """
-    ICP로 extrinsics 미세 보정.
-    캘리브레이션 행렬을 초기값으로 사용하고,
-    실제 겹치는 depth 포인트클라우드로 정밀 정합.
+    Robust extrinsics 보정:
+      1) FPFH feature 기반 RANSAC global registration (대략 정합)
+      2) Multi-scale colored ICP (정밀 정합 — 기하 + 색상)
     """
     try:
         import open3d as o3d
@@ -327,11 +355,24 @@ def refine_extrinsics_icp(
         print("[WARN] open3d 없음, ICP refinement 건너뜀")
         return T_ref
 
-    print(f"\n[ICP] Extrinsics refinement 시작 (max_corr={max_correspondence_dist*1000:.1f}mm)")
+    print(f"\n[REG] Robust extrinsics refinement 시작")
+    print(f"      FPFH global registration → Multi-scale Colored ICP")
 
-    # 여러 프레임에서 ref 카메라와 각 카메라의 포인트를 모아서 ICP
     sample_ids = frame_ids[:min(n_sample_frames, len(frame_ids))]
-    fmt = f"{{:0{pad}d}}"
+
+    # ref 카메라 포인트 빌드
+    ref_pts, ref_cols = _build_pcd_with_color(
+        capture_dir, ref_idx, sample_ids,
+        K_map[ref_idx], D_map.get(ref_idx), ds_map[ref_idx],
+        z_min, z_max, pad, stride=2,
+    )
+    if ref_pts is None:
+        print("[REG] ref 카메라 데이터 부족, 원본 유지")
+        return T_ref
+
+    pcd_ref = o3d.geometry.PointCloud()
+    pcd_ref.points = o3d.utility.Vector3dVector(ref_pts)
+    pcd_ref.colors = o3d.utility.Vector3dVector(ref_cols)
 
     T_refined = {}
     T_refined[ref_idx] = np.eye(4, dtype=np.float64)
@@ -340,77 +381,115 @@ def refine_extrinsics_icp(
         if ci == ref_idx:
             continue
 
-        ref_pts_all, ci_pts_all = [], []
+        print(f"\n[REG] cam{ci} 정합 중...")
 
-        for fid in sample_ids:
-            fid_str = fmt.format(fid)
-            # ref camera
-            d_ref_path = os.path.join(capture_dir, f"cam{ref_idx}", f"depth_{fid_str}.png")
-            d_ci_path = os.path.join(capture_dir, f"cam{ci}", f"depth_{fid_str}.png")
-            if not (os.path.exists(d_ref_path) and os.path.exists(d_ci_path)):
-                continue
-
-            d_ref = cv2.imread(d_ref_path, cv2.IMREAD_UNCHANGED)
-            d_ci = cv2.imread(d_ci_path, cv2.IMREAD_UNCHANGED)
-            if d_ref is None or d_ci is None:
-                continue
-
-            pts_ref, _ = depth_to_points(d_ref, K_map[ref_idx], D_map.get(ref_idx),
-                                         ds_map[ref_idx], z_min, z_max, stride=4, undistort=True)
-            pts_ci, _ = depth_to_points(d_ci, K_map[ci], D_map.get(ci),
-                                        ds_map[ci], z_min, z_max, stride=4, undistort=True)
-            if pts_ref.shape[0] < 100 or pts_ci.shape[0] < 100:
-                continue
-
-            ref_pts_all.append(pts_ref)
-            # ci 포인트를 현재 T_ref로 변환
-            ci_pts_all.append(transform_points(pts_ci, T_ref[ci]))
-
-        if not ref_pts_all:
-            print(f"[ICP] cam{ci}: 충분한 데이터 없음, 원본 유지")
+        ci_pts, ci_cols = _build_pcd_with_color(
+            capture_dir, ci, sample_ids,
+            K_map[ci], D_map.get(ci), ds_map[ci],
+            z_min, z_max, pad, stride=2,
+        )
+        if ci_pts is None:
+            print(f"  cam{ci}: 데이터 부족, 원본 유지")
             T_refined[ci] = T_ref[ci].copy()
             continue
 
-        ref_all = np.concatenate(ref_pts_all, axis=0)
-        ci_all = np.concatenate(ci_pts_all, axis=0)
-
-        # Open3D ICP
-        pcd_ref = o3d.geometry.PointCloud()
-        pcd_ref.points = o3d.utility.Vector3dVector(ref_all)
-
+        # ci 포인트를 현재 캘리브레이션으로 ref 좌표계로 변환
+        ci_pts_transformed = transform_points(ci_pts, T_ref[ci])
         pcd_ci = o3d.geometry.PointCloud()
-        pcd_ci.points = o3d.utility.Vector3dVector(ci_all)
+        pcd_ci.points = o3d.utility.Vector3dVector(ci_pts_transformed)
+        pcd_ci.colors = o3d.utility.Vector3dVector(ci_cols)
 
-        # voxel downsample for speed
-        pcd_ref = pcd_ref.voxel_down_sample(0.003)
-        pcd_ci = pcd_ci.voxel_down_sample(0.003)
+        # ---- Step 1: FPFH Global Registration ----
+        voxel_global = 0.005  # 5mm voxel for FPFH
+        pcd_ref_ds = pcd_ref.voxel_down_sample(voxel_global)
+        pcd_ci_ds = pcd_ci.voxel_down_sample(voxel_global)
 
-        # estimate normals for point-to-plane ICP
-        pcd_ref.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=0.02, max_nn=30))
-        pcd_ci.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=0.02, max_nn=30))
+        radius_normal = voxel_global * 2
+        pcd_ref_ds.estimate_normals(
+            o3d.geometry.KDTreeSearchParamHybrid(radius=radius_normal, max_nn=30))
+        pcd_ci_ds.estimate_normals(
+            o3d.geometry.KDTreeSearchParamHybrid(radius=radius_normal, max_nn=30))
 
-        # point-to-plane ICP (더 정확함)
-        result = o3d.pipelines.registration.registration_icp(
-            pcd_ci, pcd_ref,
-            max_correspondence_dist,
-            np.eye(4),  # 이미 T_ref로 변환했으므로 초기값은 identity
-            o3d.pipelines.registration.TransformationEstimationPointToPlane(),
-            o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=100),
+        radius_feature = voxel_global * 5
+        fpfh_ref = o3d.pipelines.registration.compute_fpfh_feature(
+            pcd_ref_ds,
+            o3d.geometry.KDTreeSearchParamHybrid(radius=radius_feature, max_nn=100))
+        fpfh_ci = o3d.pipelines.registration.compute_fpfh_feature(
+            pcd_ci_ds,
+            o3d.geometry.KDTreeSearchParamHybrid(radius=radius_feature, max_nn=100))
+
+        # RANSAC으로 대략적 초기 정합
+        dist_threshold_global = voxel_global * 1.5
+        result_ransac = o3d.pipelines.registration.registration_ransac_based_on_feature_matching(
+            pcd_ci_ds, pcd_ref_ds,
+            fpfh_ci, fpfh_ref,
+            mutual_filter=True,
+            max_correspondence_distance=dist_threshold_global,
+            estimation_method=o3d.pipelines.registration.TransformationEstimationPointToPoint(False),
+            ransac_n=3,
+            checkers=[
+                o3d.pipelines.registration.CorrespondenceCheckerBasedOnEdgeLength(0.9),
+                o3d.pipelines.registration.CorrespondenceCheckerBasedOnDistance(dist_threshold_global),
+            ],
+            criteria=o3d.pipelines.registration.RANSACConvergenceCriteria(100000, 0.999),
         )
 
-        # ICP 보정량을 원래 T_ref에 합성
-        T_correction = result.transformation
+        T_init = result_ransac.transformation
+        R_init = T_init[:3, :3]
+        t_init = T_init[:3, 3]
+        angle_init = np.degrees(np.arccos(np.clip((np.trace(R_init) - 1) / 2, -1, 1)))
+        shift_init = np.linalg.norm(t_init) * 1000
+
+        print(f"  FPFH RANSAC: fitness={result_ransac.fitness:.4f}  "
+              f"corr={len(result_ransac.correspondence_set)}  "
+              f"rot={angle_init:.2f}°  trans={shift_init:.1f}mm")
+
+        # RANSAC 결과가 너무 크면 (local minimum 의심) identity 사용
+        if angle_init > 15 or shift_init > 100:
+            print(f"  -> RANSAC 결과 과대, identity 초기값 사용")
+            T_init = np.eye(4)
+
+        # ---- Step 2: Multi-scale Colored ICP ----
+        # 색상 + 기하 정보 모두 활용 → 평면 영역에서도 정확
+        voxel_sizes = [0.005, 0.003, 0.001]  # coarse → fine
+        max_iters = [100, 80, 50]
+
+        T_current = T_init.copy()
+        for scale_i, (vs, mi) in enumerate(zip(voxel_sizes, max_iters)):
+            pcd_ref_s = pcd_ref.voxel_down_sample(vs)
+            pcd_ci_s = pcd_ci.voxel_down_sample(vs)
+
+            pcd_ref_s.estimate_normals(
+                o3d.geometry.KDTreeSearchParamHybrid(radius=vs * 2, max_nn=30))
+            pcd_ci_s.estimate_normals(
+                o3d.geometry.KDTreeSearchParamHybrid(radius=vs * 2, max_nn=30))
+
+            result_icp = o3d.pipelines.registration.registration_colored_icp(
+                pcd_ci_s, pcd_ref_s,
+                vs * 3,  # correspondence distance = 3x voxel
+                T_current,
+                o3d.pipelines.registration.TransformationEstimationForColoredICP(),
+                o3d.pipelines.registration.ICPConvergenceCriteria(
+                    relative_fitness=1e-6,
+                    relative_rmse=1e-6,
+                    max_iteration=mi,
+                ),
+            )
+            T_current = result_icp.transformation
+            print(f"  Scale {scale_i} (voxel={vs*1000:.0f}mm): "
+                  f"fitness={result_icp.fitness:.4f}  "
+                  f"RMSE={result_icp.inlier_rmse*1000:.3f}mm")
+
+        # 최종 보정량 합성
+        T_correction = T_current
         T_refined[ci] = T_correction @ T_ref[ci]
 
-        # 보정량 분석
         R_corr = T_correction[:3, :3]
         t_corr = T_correction[:3, 3]
         angle_deg = np.degrees(np.arccos(np.clip((np.trace(R_corr) - 1) / 2, -1, 1)))
         shift_mm = np.linalg.norm(t_corr) * 1000
 
-        print(f"[ICP] cam{ci}: fitness={result.fitness:.4f}  "
-              f"RMSE={result.inlier_rmse*1000:.2f}mm  "
-              f"보정량: rot={angle_deg:.3f}°  trans={shift_mm:.2f}mm")
+        print(f"  최종 보정량: rot={angle_deg:.3f}°  trans={shift_mm:.2f}mm")
 
     return T_refined
 
