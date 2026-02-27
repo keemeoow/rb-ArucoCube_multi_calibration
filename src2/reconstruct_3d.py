@@ -123,12 +123,26 @@ def _detect_zero_padding(capture_dir: str, cam_idx: int) -> int:
 # ──────────────────────────────────────────────────
 # 3D reconstruction core
 # ──────────────────────────────────────────────────
-def depth_to_points(depth_u16: np.ndarray, K: np.ndarray, depth_scale: float,
-                    z_min: float, z_max: float, stride: int = 1
+def bilateral_depth_filter(depth_u16: np.ndarray, d: int = 5,
+                           sigma_color: float = 30.0,
+                           sigma_space: float = 5.0) -> np.ndarray:
+    """
+    Bilateral filter: depth 노이즈를 줄이되 엣지(물체 경계)는 보존.
+    - sigma_color: 값 차이 허용 범위 (작을수록 엣지 보존 강함)
+    - sigma_space: 공간적 영향 범위 (작을수록 좁은 이웃만 참고)
+    """
+    depth_f32 = depth_u16.astype(np.float32)
+    filtered = cv2.bilateralFilter(depth_f32, d, sigma_color, sigma_space)
+    return filtered.astype(np.uint16)
+
+
+def depth_to_points(depth_u16: np.ndarray, K: np.ndarray, D: np.ndarray,
+                    depth_scale: float, z_min: float, z_max: float,
+                    stride: int = 1, undistort: bool = True
                     ) -> Tuple[np.ndarray, np.ndarray]:
     """
     depth 이미지 → camera frame 3D 점 + 픽셀 좌표(v, u).
-    vectorized 구현으로 Step4보다 빠름.
+    - undistort=True: 렌즈 왜곡 보정 적용 (외곽부 3~5mm 오차 제거)
     """
     fx, fy = K[0, 0], K[1, 1]
     cx, cy = K[0, 2], K[1, 2]
@@ -142,12 +156,55 @@ def depth_to_points(depth_u16: np.ndarray, K: np.ndarray, depth_scale: float,
     u = u_grid[valid].astype(np.float64)
     v = v_grid[valid].astype(np.float64)
 
-    x = (u - cx) * z / fx
-    y = (v - cy) * z / fy
+    if undistort and D is not None and np.any(D != 0):
+        # 렌즈 왜곡 보정: 픽셀 좌표 → 보정된 normalized 좌표 → 3D
+        pts_2d = np.column_stack([u, v]).reshape(-1, 1, 2).astype(np.float64)
+        pts_undist = cv2.undistortPoints(pts_2d, K, D, P=None)  # normalized coords
+        pts_undist = pts_undist.reshape(-1, 2)
+        x = pts_undist[:, 0] * z
+        y = pts_undist[:, 1] * z
+    else:
+        x = (u - cx) * z / fx
+        y = (v - cy) * z / fy
 
     points = np.column_stack([x, y, z])
     pixels = np.column_stack([v.astype(np.int32), u.astype(np.int32)])
     return points, pixels
+
+
+def statistical_outlier_removal(points: np.ndarray, colors: np.ndarray,
+                                nb_neighbors: int = 20,
+                                std_ratio: float = 2.0
+                                ) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Statistical Outlier Removal (SOR):
+    각 점의 k-nearest neighbor 평균 거리를 구하고,
+    전체 평균 + std_ratio * 표준편차를 초과하는 점을 제거.
+    떠다니는 노이즈 점을 효과적으로 제거.
+    """
+    if points.shape[0] < nb_neighbors + 1:
+        return points, colors
+
+    try:
+        from scipy.spatial import cKDTree
+        tree = cKDTree(points)
+        dists, _ = tree.query(points, k=nb_neighbors + 1)  # +1: 자기 자신 포함
+        mean_dists = dists[:, 1:].mean(axis=1)  # 자기 자신 제외
+
+        global_mean = mean_dists.mean()
+        global_std = mean_dists.std()
+        threshold = global_mean + std_ratio * global_std
+
+        inlier_mask = mean_dists < threshold
+        n_removed = int((~inlier_mask).sum())
+        if n_removed > 0:
+            print(f"    SOR: {n_removed:,} outliers 제거 "
+                  f"(threshold={threshold:.4f}m, {100*n_removed/len(points):.1f}%)")
+        return points[inlier_mask], colors[inlier_mask]
+
+    except ImportError:
+        print("    [WARN] scipy 없음, SOR 건너뜀 (pip install scipy)")
+        return points, colors
 
 
 def transform_points(points: np.ndarray, T: np.ndarray) -> np.ndarray:
@@ -194,8 +251,11 @@ def save_ply(path: str, points: np.ndarray, colors: np.ndarray) -> None:
 # ──────────────────────────────────────────────────
 def fuse_frame(capture_dir: str, frame_idx: int, cam_indices: List[int],
                T_ref: Dict[int, np.ndarray], K_map: Dict[int, np.ndarray],
-               ds_map: Dict[int, float], z_min: float, z_max: float,
-               stride: int, pad: int) -> Tuple[List[np.ndarray], List[np.ndarray]]:
+               D_map: Dict[int, np.ndarray], ds_map: Dict[int, float],
+               z_min: float, z_max: float, stride: int, pad: int,
+               use_bilateral: bool = True, use_undistort: bool = True,
+               use_sor: bool = True, sor_neighbors: int = 20, sor_std: float = 2.0,
+               ) -> Tuple[List[np.ndarray], List[np.ndarray]]:
     all_pts, all_cols = [], []
     fmt = f"{{:0{pad}d}}"
     fid_str = fmt.format(frame_idx)
@@ -214,8 +274,17 @@ def fuse_frame(capture_dir: str, frame_idx: int, cam_indices: List[int],
         if rgb_bgr is None or depth_u16 is None:
             continue
 
+        # [필터 1] Bilateral depth filter — 엣지 보존 노이즈 제거
+        if use_bilateral:
+            depth_u16 = bilateral_depth_filter(depth_u16)
+
         rgb = cv2.cvtColor(rgb_bgr, cv2.COLOR_BGR2RGB).astype(np.float64) / 255.0
-        pts_cam, pixels = depth_to_points(depth_u16, K_map[ci], ds_map[ci], z_min, z_max, stride)
+
+        # [개선] 렌즈 왜곡 보정 적용
+        pts_cam, pixels = depth_to_points(
+            depth_u16, K_map[ci], D_map.get(ci), ds_map[ci],
+            z_min, z_max, stride, undistort=use_undistort,
+        )
         if pts_cam.shape[0] == 0:
             print(f"[WARN] cam{ci} frame {frame_idx}: 유효 depth 점 0개")
             continue
@@ -223,9 +292,15 @@ def fuse_frame(capture_dir: str, frame_idx: int, cam_indices: List[int],
         pts_ref = transform_points(pts_cam, T_ref[ci])
         cols = rgb[pixels[:, 0], pixels[:, 1]]
 
+        # [필터 2] Statistical Outlier Removal — 떠다니는 노이즈 제거
+        if use_sor:
+            pts_ref, cols = statistical_outlier_removal(
+                pts_ref, cols, nb_neighbors=sor_neighbors, std_ratio=sor_std,
+            )
+
         all_pts.append(pts_ref)
         all_cols.append(cols)
-        print(f"  cam{ci}: {pts_cam.shape[0]:>8,} points")
+        print(f"  cam{ci}: {pts_ref.shape[0]:>8,} points (after filters)")
 
     return all_pts, all_cols
 
@@ -306,6 +381,13 @@ def main():
     parser.add_argument("--stride", type=int, default=1, help="depth subsampling (1=dense, 4=sparse)")
     parser.add_argument("--voxel_mm", type=float, default=0.0, help="voxel downsample 크기 (mm), 0=OFF")
 
+    # 정확도 필터
+    parser.add_argument("--no_undistort", action="store_true", help="렌즈 왜곡 보정 끄기")
+    parser.add_argument("--no_bilateral", action="store_true", help="bilateral depth filter 끄기")
+    parser.add_argument("--no_sor", action="store_true", help="statistical outlier removal 끄기")
+    parser.add_argument("--sor_neighbors", type=int, default=20, help="SOR k-nearest neighbors 수")
+    parser.add_argument("--sor_std", type=float, default=2.0, help="SOR std_ratio (낮을수록 공격적 제거)")
+
     parser.add_argument("--out", type=str, default=None, help="PLY 출력 경로 (기본: capture_dir 내)")
     parser.add_argument("--open3d", action="store_true", help="Open3D 뷰어로 결과 표시")
     parser.add_argument("--no_plot", action="store_true", help="matplotlib 시각화 끄기")
@@ -319,10 +401,11 @@ def main():
     print(f"[INFO] 프레임: {len(frame_ids)}장  (range: {frame_ids[0]} ~ {frame_ids[-1]})")
 
     # --- load calibration ---
-    K_map, ds_map = {}, {}
+    K_map, D_map, ds_map = {}, {}, {}
     for ci in cam_indices:
         K, D, ds = load_intrinsics(args.intrinsics_dir, ci)
         K_map[ci] = K
+        D_map[ci] = D
         ds_map[ci] = ds
 
     T_ref = load_extrinsics(args.calib_dir, args.ref_cam, cam_indices)
@@ -330,6 +413,19 @@ def main():
     # --- detect file naming ---
     pad = _detect_zero_padding(args.capture_dir, cam_indices[0])
     print(f"[INFO] 파일명 zero-padding: {pad}자리")
+
+    # --- filter settings ---
+    use_undistort = not args.no_undistort
+    use_bilateral = not args.no_bilateral
+    use_sor = not args.no_sor
+    filters_on = []
+    if use_undistort:
+        filters_on.append("undistort")
+    if use_bilateral:
+        filters_on.append("bilateral")
+    if use_sor:
+        filters_on.append(f"SOR(k={args.sor_neighbors},std={args.sor_std})")
+    print(f"[INFO] 필터: {', '.join(filters_on) if filters_on else 'OFF'}")
 
     # --- output directory ---
     out_dir = os.path.join(args.capture_dir, "ply")
@@ -348,8 +444,10 @@ def main():
             fmt_str = f"{{:0{pad}d}}".format(fid)
             print(f"[{i+1}/{len(target_frames)}] frame {fid}:")
             f_pts, f_cols = fuse_frame(
-                args.capture_dir, fid, cam_indices, T_ref, K_map, ds_map,
+                args.capture_dir, fid, cam_indices, T_ref, K_map, D_map, ds_map,
                 args.z_min, args.z_max, args.stride, pad,
+                use_bilateral=use_bilateral, use_undistort=use_undistort,
+                use_sor=use_sor, sor_neighbors=args.sor_neighbors, sor_std=args.sor_std,
             )
             if not f_pts:
                 print(f"  -> SKIP (유효 점 없음)\n")
@@ -392,8 +490,10 @@ def main():
     for fid in target_frames:
         print(f"[FUSE] frame {fid}:")
         f_pts, f_cols = fuse_frame(
-            args.capture_dir, fid, cam_indices, T_ref, K_map, ds_map,
+            args.capture_dir, fid, cam_indices, T_ref, K_map, D_map, ds_map,
             args.z_min, args.z_max, args.stride, pad,
+            use_bilateral=use_bilateral, use_undistort=use_undistort,
+            use_sor=use_sor, sor_neighbors=args.sor_neighbors, sor_std=args.sor_std,
         )
         all_pts.extend(f_pts)
         all_cols.extend(f_cols)

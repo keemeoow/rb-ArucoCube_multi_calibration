@@ -126,6 +126,33 @@ python Step4_fuse_depth_to_ref_pcd.py \
 참고:
 - `device_map.json`이 없어도 `cam*.npz`, `T_Cref_Ci.npy`, depth/rgb 데이터가 있으면 실행 가능하도록 되어 있습니다.
 
+### (옵션) SAM3D 마스크 기반 인스턴스 3D 복원 (정확한 위치 좌표 포함)
+
+`src2/reconstruct_sam3d_multicam.py`는 Step3에서 얻은 `T_Cref_Ci`를 사용해,
+SAM/SAM3D 마스크 픽셀만 3D로 역투영하고 `ref_cam` 좌표계로 정합합니다.
+
+입력 예시:
+- RGBD: `capture_dir/cam0/rgb_000123.jpg`, `depth_000123.png`
+- 마스크: `masks_dir/cam0/mask_000123.png` (라벨맵, 0=배경, 1..N=인스턴스)
+  또는 `masks_dir/cam0/chair_000123.png` 형태의 바이너리 마스크
+
+예시 실행:
+
+```bash
+python src2/reconstruct_sam3d_multicam.py \
+  --capture_dir ./src2/data/rgbd_capture \
+  --intrinsics_dir ./src2/intrinsics \
+  --calib_dir ./src2/data/cube_session_01/calib_out_cube \
+  --masks_dir ./src2/data/rgbd_capture_masks \
+  --ref_cam 0 \
+  --all_frames \
+  --voxel_mm 2
+```
+
+출력:
+- `sam3d/instance_<id>_*.ply` (인스턴스별 3D 포인트클라우드)
+- `sam3d/instance_positions.json` (centroid, bbox 등 미터 단위 위치값)
+
 ## 빠른 점검 체크리스트
 
 - Step1 후 `intrinsics/cam*.npz` 파일이 카메라 수만큼 생성되었는지
