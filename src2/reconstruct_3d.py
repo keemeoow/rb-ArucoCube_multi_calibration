@@ -666,6 +666,8 @@ def main():
     parser.add_argument("--frame", type=int, default=None, help="특정 프레임만 복원 (기본: 첫 번째)")
     parser.add_argument("--each_frame", action="store_true", help="모든 프레임을 각각 개별 PLY로 저장 (다른 물체들)")
     parser.add_argument("--all_frames", action="store_true", help="모든 프레임을 하나로 합치기 (같은 물체)")
+    parser.add_argument("--per_cam", action="store_true",
+                        help="진단 모드: 카메라별 개별 PLY 저장 (정합 문제 진단용)")
     parser.add_argument("--frame_skip", type=int, default=1, help="each_frame/all_frames 시 N번째마다 사용")
 
     parser.add_argument("--z_min", type=float, default=0.1, help="depth 최소 거리 (m)")
@@ -749,6 +751,77 @@ def main():
     # --- output directory ---
     out_dir = os.path.join(args.capture_dir, "ply")
     os.makedirs(out_dir, exist_ok=True)
+
+    # ============================================================
+    # --per_cam : 카메라별 개별 PLY 저장 (정합 진단용)
+    # ============================================================
+    if args.per_cam:
+        fid = args.frame if args.frame is not None else frame_ids[0]
+        print(f"\n[DIAG] 카메라별 개별 PLY 저장 (frame {fid})")
+        diag_dir = os.path.join(args.capture_dir, "ply_per_cam")
+        os.makedirs(diag_dir, exist_ok=True)
+
+        fmt = f"{{:0{pad}d}}"
+        fid_str = fmt.format(fid)
+
+        for ci in cam_indices:
+            rgb_path = os.path.join(args.capture_dir, f"cam{ci}", f"rgb_{fid_str}.jpg")
+            depth_path = os.path.join(args.capture_dir, f"cam{ci}", f"depth_{fid_str}.png")
+            if not (os.path.exists(rgb_path) and os.path.exists(depth_path)):
+                print(f"  cam{ci}: 파일 없음, skip")
+                continue
+            rgb_bgr = cv2.imread(rgb_path, cv2.IMREAD_COLOR)
+            depth_u16 = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED)
+            if rgb_bgr is None or depth_u16 is None:
+                continue
+
+            if use_inpaint:
+                depth_u16 = depth_inpaint(depth_u16)
+            if use_bilateral:
+                depth_u16 = bilateral_depth_filter(depth_u16)
+
+            rgb = cv2.cvtColor(rgb_bgr, cv2.COLOR_BGR2RGB).astype(np.float64) / 255.0
+            pts_cam, pixels = depth_to_points(
+                depth_u16, K_map[ci], D_map.get(ci), ds_map[ci],
+                args.z_min, args.z_max, args.stride, undistort=use_undistort,
+            )
+            if pts_cam.shape[0] == 0:
+                print(f"  cam{ci}: 유효 점 0개")
+                continue
+            cols = rgb[pixels[:, 0], pixels[:, 1]]
+
+            # 카메라 자체 좌표계 PLY (변환 없음)
+            path_local = os.path.join(diag_dir, f"frame{fid:0{pad}d}_cam{ci}_local.ply")
+            save_ply(path_local, pts_cam, cols)
+
+            # ref 좌표계로 변환된 PLY
+            pts_ref = transform_points(pts_cam, T_ref[ci])
+            path_ref = os.path.join(diag_dir, f"frame{fid:0{pad}d}_cam{ci}_ref.ply")
+            save_ply(path_ref, pts_ref, cols)
+
+            # 정보 출력
+            bb_min = pts_cam.min(axis=0) * 1000
+            bb_max = pts_cam.max(axis=0) * 1000
+            bb_size = bb_max - bb_min
+            print(f"  cam{ci}: {pts_cam.shape[0]:,} pts  "
+                  f"bbox: {bb_size[0]:.0f}x{bb_size[1]:.0f}x{bb_size[2]:.0f} mm")
+            if ci != args.ref_cam:
+                T = T_ref[ci]
+                r = T[:3, :3]
+                t = T[:3, 3]
+                angle = np.degrees(np.arccos(np.clip((np.trace(r) - 1) / 2, -1, 1)))
+                dist = np.linalg.norm(t) * 1000
+                print(f"         T_C{args.ref_cam}_C{ci}: rot={angle:.2f}°  trans={dist:.1f}mm")
+
+        print(f"\n[DIAG] 결과:")
+        print(f"  {diag_dir}/")
+        print(f"  *_local.ply = 각 카메라 자체 좌표계 (개별 형태 확인)")
+        print(f"  *_ref.ply   = ref 좌표계로 변환 (정합 확인)")
+        print(f"\n  확인 방법:")
+        print(f"  1) _local.ply 가 각각 정상이면 → extrinsics(변환행렬) 문제")
+        print(f"  2) _local.ply 자체가 찌그러져 있으면 → intrinsics(내부 파라미터) 문제")
+        print(f"  3) _ref.ply 3개를 동시에 열어서 겹침 확인 → 정합 오차 확인")
+        return
 
     # ============================================================
     # --each_frame : 프레임별 개별 PLY 저장 (각각 다른 물체)
