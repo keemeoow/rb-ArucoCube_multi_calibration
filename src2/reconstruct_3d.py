@@ -608,7 +608,7 @@ def main():
 
     # ICP extrinsics refinement
     parser.add_argument("--icp", action="store_true", help="ICP로 캘리브레이션 extrinsics 미세 보정")
-    parser.add_argument("--icp_dist", type=float, default=0.01, help="ICP max correspondence distance (m)")
+    parser.add_argument("--icp_dist", type=float, default=0.02, help="ICP max correspondence distance (m)")
     parser.add_argument("--icp_frames", type=int, default=5, help="ICP에 사용할 샘플 프레임 수")
 
     parser.add_argument("--out", type=str, default=None, help="PLY 출력 경로 (기본: capture_dir 내)")
