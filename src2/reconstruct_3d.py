@@ -10,6 +10,13 @@ python reconstruct_3d.py \
   --intrinsics_dir ./intrinsics \
   --calib_dir ./data/cube_session_01/calib_out_cube \
   --each_frame --no_plot --remove_plane
+
+# ICP로 캘리브레이션 보정 후 재구성 (찌그러짐 개선)
+python reconstruct_3d.py \
+  --capture_dir ./data/rgbd_capture \
+  --intrinsics_dir ./intrinsics \
+  --calib_dir ./data/cube_session_01/calib_out_cube \
+  --each_frame --no_plot --remove_plane --icp
 """
 
 """
@@ -301,6 +308,113 @@ def remove_background_plane(points: np.ndarray, colors: np.ndarray,
         return points, colors
 
 
+def refine_extrinsics_icp(
+    capture_dir: str, frame_ids: List[int], cam_indices: List[int],
+    T_ref: Dict[int, np.ndarray], K_map: Dict[int, np.ndarray],
+    D_map: Dict[int, np.ndarray], ds_map: Dict[int, float],
+    ref_idx: int, z_min: float, z_max: float, pad: int,
+    max_correspondence_dist: float = 0.01,
+    n_sample_frames: int = 5,
+) -> Dict[int, np.ndarray]:
+    """
+    ICP로 extrinsics 미세 보정.
+    캘리브레이션 행렬을 초기값으로 사용하고,
+    실제 겹치는 depth 포인트클라우드로 정밀 정합.
+    """
+    try:
+        import open3d as o3d
+    except ImportError:
+        print("[WARN] open3d 없음, ICP refinement 건너뜀")
+        return T_ref
+
+    print(f"\n[ICP] Extrinsics refinement 시작 (max_corr={max_correspondence_dist*1000:.1f}mm)")
+
+    # 여러 프레임에서 ref 카메라와 각 카메라의 포인트를 모아서 ICP
+    sample_ids = frame_ids[:min(n_sample_frames, len(frame_ids))]
+    fmt = f"{{:0{pad}d}}"
+
+    T_refined = {}
+    T_refined[ref_idx] = np.eye(4, dtype=np.float64)
+
+    for ci in cam_indices:
+        if ci == ref_idx:
+            continue
+
+        ref_pts_all, ci_pts_all = [], []
+
+        for fid in sample_ids:
+            fid_str = fmt.format(fid)
+            # ref camera
+            d_ref_path = os.path.join(capture_dir, f"cam{ref_idx}", f"depth_{fid_str}.png")
+            d_ci_path = os.path.join(capture_dir, f"cam{ci}", f"depth_{fid_str}.png")
+            if not (os.path.exists(d_ref_path) and os.path.exists(d_ci_path)):
+                continue
+
+            d_ref = cv2.imread(d_ref_path, cv2.IMREAD_UNCHANGED)
+            d_ci = cv2.imread(d_ci_path, cv2.IMREAD_UNCHANGED)
+            if d_ref is None or d_ci is None:
+                continue
+
+            pts_ref, _ = depth_to_points(d_ref, K_map[ref_idx], D_map.get(ref_idx),
+                                         ds_map[ref_idx], z_min, z_max, stride=4, undistort=True)
+            pts_ci, _ = depth_to_points(d_ci, K_map[ci], D_map.get(ci),
+                                        ds_map[ci], z_min, z_max, stride=4, undistort=True)
+            if pts_ref.shape[0] < 100 or pts_ci.shape[0] < 100:
+                continue
+
+            ref_pts_all.append(pts_ref)
+            # ci 포인트를 현재 T_ref로 변환
+            ci_pts_all.append(transform_points(pts_ci, T_ref[ci]))
+
+        if not ref_pts_all:
+            print(f"[ICP] cam{ci}: 충분한 데이터 없음, 원본 유지")
+            T_refined[ci] = T_ref[ci].copy()
+            continue
+
+        ref_all = np.concatenate(ref_pts_all, axis=0)
+        ci_all = np.concatenate(ci_pts_all, axis=0)
+
+        # Open3D ICP
+        pcd_ref = o3d.geometry.PointCloud()
+        pcd_ref.points = o3d.utility.Vector3dVector(ref_all)
+
+        pcd_ci = o3d.geometry.PointCloud()
+        pcd_ci.points = o3d.utility.Vector3dVector(ci_all)
+
+        # voxel downsample for speed
+        pcd_ref = pcd_ref.voxel_down_sample(0.003)
+        pcd_ci = pcd_ci.voxel_down_sample(0.003)
+
+        # estimate normals for point-to-plane ICP
+        pcd_ref.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=0.02, max_nn=30))
+        pcd_ci.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=0.02, max_nn=30))
+
+        # point-to-plane ICP (더 정확함)
+        result = o3d.pipelines.registration.registration_icp(
+            pcd_ci, pcd_ref,
+            max_correspondence_dist,
+            np.eye(4),  # 이미 T_ref로 변환했으므로 초기값은 identity
+            o3d.pipelines.registration.TransformationEstimationPointToPlane(),
+            o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=100),
+        )
+
+        # ICP 보정량을 원래 T_ref에 합성
+        T_correction = result.transformation
+        T_refined[ci] = T_correction @ T_ref[ci]
+
+        # 보정량 분석
+        R_corr = T_correction[:3, :3]
+        t_corr = T_correction[:3, 3]
+        angle_deg = np.degrees(np.arccos(np.clip((np.trace(R_corr) - 1) / 2, -1, 1)))
+        shift_mm = np.linalg.norm(t_corr) * 1000
+
+        print(f"[ICP] cam{ci}: fitness={result.fitness:.4f}  "
+              f"RMSE={result.inlier_rmse*1000:.2f}mm  "
+              f"보정량: rot={angle_deg:.3f}°  trans={shift_mm:.2f}mm")
+
+    return T_refined
+
+
 def transform_points(points: np.ndarray, T: np.ndarray) -> np.ndarray:
     R = T[:3, :3]
     t = T[:3, 3]
@@ -492,6 +606,11 @@ def main():
     parser.add_argument("--remove_plane", action="store_true", help="RANSAC 배경 평면(테이블/바닥) 제거")
     parser.add_argument("--plane_dist", type=float, default=0.005, help="평면 distance threshold (m)")
 
+    # ICP extrinsics refinement
+    parser.add_argument("--icp", action="store_true", help="ICP로 캘리브레이션 extrinsics 미세 보정")
+    parser.add_argument("--icp_dist", type=float, default=0.01, help="ICP max correspondence distance (m)")
+    parser.add_argument("--icp_frames", type=int, default=5, help="ICP에 사용할 샘플 프레임 수")
+
     parser.add_argument("--out", type=str, default=None, help="PLY 출력 경로 (기본: capture_dir 내)")
     parser.add_argument("--open3d", action="store_true", help="Open3D 뷰어로 결과 표시")
     parser.add_argument("--no_plot", action="store_true", help="matplotlib 시각화 끄기")
@@ -518,6 +637,16 @@ def main():
     pad = _detect_zero_padding(args.capture_dir, cam_indices[0])
     print(f"[INFO] 파일명 zero-padding: {pad}자리")
 
+    # --- ICP extrinsics refinement ---
+    if args.icp:
+        T_ref = refine_extrinsics_icp(
+            args.capture_dir, frame_ids, cam_indices, T_ref,
+            K_map, D_map, ds_map, args.ref_cam,
+            args.z_min, args.z_max, pad,
+            max_correspondence_dist=args.icp_dist,
+            n_sample_frames=args.icp_frames,
+        )
+
     # --- filter settings ---
     use_undistort = not args.no_undistort
     use_bilateral = not args.no_bilateral
@@ -534,6 +663,8 @@ def main():
         filters_on.append(f"SOR(k={args.sor_neighbors},std={args.sor_std})")
     if args.remove_plane:
         filters_on.append(f"plane_removal(d={args.plane_dist}m)")
+    if args.icp:
+        filters_on.append(f"ICP(d={args.icp_dist*1000:.0f}mm, frames={args.icp_frames})")
     print(f"[INFO] 필터: {', '.join(filters_on) if filters_on else 'OFF'}")
 
     # --- output directory ---
