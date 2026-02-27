@@ -5,6 +5,14 @@
 # 사용법 (capture_rgbd_3cam.py로 촬영한 데이터 기준):
 #
 """
+python reconstruct_3d.py \
+  --capture_dir ./data/rgbd_capture \
+  --intrinsics_dir ./intrinsics \
+  --calib_dir ./data/cube_session_01/calib_out_cube \
+  --each_frame --no_plot --remove_plane
+"""
+
+"""
 단일 프레임 복원
 python reconstruct_3d.py \
     --capture_dir ./data/rgbd_capture \
@@ -123,6 +131,21 @@ def _detect_zero_padding(capture_dir: str, cam_idx: int) -> int:
 # ──────────────────────────────────────────────────
 # 3D reconstruction core
 # ──────────────────────────────────────────────────
+def depth_inpaint(depth_u16: np.ndarray, max_hole_px: int = 5) -> np.ndarray:
+    """
+    Depth 구멍 채우기: depth=0인 소규모 구멍을 주변 값으로 보간.
+    물체 표면의 빈 영역을 채워서 포인트클라우드 밀도를 높임.
+    - max_hole_px: 채울 구멍 최대 반경 (px). 너무 크면 배경을 오염시킴.
+    """
+    mask = (depth_u16 == 0).astype(np.uint8)
+    # 작은 구멍만 채우기 위해 morphological closing 먼저 적용
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (max_hole_px, max_hole_px))
+    # 구멍 영역 중 주변에 유효 값이 있는 부분만 채움
+    depth_f32 = depth_u16.astype(np.float32)
+    inpainted = cv2.inpaint(depth_f32, mask, max_hole_px, cv2.INPAINT_NS)
+    return inpainted.astype(np.uint16)
+
+
 def bilateral_depth_filter(depth_u16: np.ndarray, d: int = 5,
                            sigma_color: float = 30.0,
                            sigma_space: float = 5.0) -> np.ndarray:
@@ -207,6 +230,77 @@ def statistical_outlier_removal(points: np.ndarray, colors: np.ndarray,
         return points, colors
 
 
+def remove_background_plane(points: np.ndarray, colors: np.ndarray,
+                            distance_threshold: float = 0.005,
+                            ransac_n: int = 3,
+                            num_iterations: int = 1000,
+                            min_plane_ratio: float = 0.15
+                            ) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    RANSAC 평면 검출로 배경(테이블/바닥) 제거.
+    가장 큰 평면을 찾아서 제거하면 물체만 남음.
+    - distance_threshold: 평면으로부터 이 거리(m) 이내의 점을 평면으로 간주
+    - min_plane_ratio: 전체 대비 이 비율 이상이어야 평면으로 인정
+    """
+    if points.shape[0] < 100:
+        return points, colors
+
+    try:
+        import open3d as o3d
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(points)
+        pcd.colors = o3d.utility.Vector3dVector(colors)
+
+        plane_model, inliers = pcd.segment_plane(
+            distance_threshold=distance_threshold,
+            ransac_n=ransac_n,
+            num_iterations=num_iterations,
+        )
+        n_plane = len(inliers)
+        ratio = n_plane / len(points)
+
+        if ratio < min_plane_ratio:
+            print(f"    plane: {ratio*100:.1f}% (< {min_plane_ratio*100:.0f}% threshold) -> 제거 안 함")
+            return points, colors
+
+        # 평면이 아닌 점만 남기기 (= 물체)
+        outlier_pcd = pcd.select_by_index(inliers, invert=True)
+        pts_out = np.asarray(outlier_pcd.points)
+        cols_out = np.asarray(outlier_pcd.colors)
+        a, b, c, d = plane_model
+        print(f"    plane 제거: {n_plane:,}점 ({ratio*100:.1f}%) "
+              f"[{a:.3f}x + {b:.3f}y + {c:.3f}z + {d:.3f} = 0]")
+        return pts_out, cols_out
+
+    except ImportError:
+        # open3d 없으면 numpy RANSAC fallback
+        best_inliers = None
+        n = len(points)
+        for _ in range(num_iterations):
+            idx = np.random.choice(n, ransac_n, replace=False)
+            p0, p1, p2 = points[idx[0]], points[idx[1]], points[idx[2]]
+            normal = np.cross(p1 - p0, p2 - p0)
+            norm_len = np.linalg.norm(normal)
+            if norm_len < 1e-10:
+                continue
+            normal /= norm_len
+            d = -normal.dot(p0)
+            dists = np.abs(points.dot(normal) + d)
+            inliers = np.where(dists < distance_threshold)[0]
+            if best_inliers is None or len(inliers) > len(best_inliers):
+                best_inliers = inliers
+
+        if best_inliers is not None:
+            ratio = len(best_inliers) / n
+            if ratio >= min_plane_ratio:
+                mask = np.ones(n, dtype=bool)
+                mask[best_inliers] = False
+                print(f"    plane 제거 (numpy): {len(best_inliers):,}점 ({ratio*100:.1f}%)")
+                return points[mask], colors[mask]
+
+        return points, colors
+
+
 def transform_points(points: np.ndarray, T: np.ndarray) -> np.ndarray:
     R = T[:3, :3]
     t = T[:3, 3]
@@ -255,6 +349,7 @@ def fuse_frame(capture_dir: str, frame_idx: int, cam_indices: List[int],
                z_min: float, z_max: float, stride: int, pad: int,
                use_bilateral: bool = True, use_undistort: bool = True,
                use_sor: bool = True, sor_neighbors: int = 20, sor_std: float = 2.0,
+               use_inpaint: bool = True,
                ) -> Tuple[List[np.ndarray], List[np.ndarray]]:
     all_pts, all_cols = [], []
     fmt = f"{{:0{pad}d}}"
@@ -273,6 +368,10 @@ def fuse_frame(capture_dir: str, frame_idx: int, cam_indices: List[int],
         depth_u16 = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED)
         if rgb_bgr is None or depth_u16 is None:
             continue
+
+        # [필터 0] Depth inpaint — 소규모 구멍 채우기
+        if use_inpaint:
+            depth_u16 = depth_inpaint(depth_u16)
 
         # [필터 1] Bilateral depth filter — 엣지 보존 노이즈 제거
         if use_bilateral:
@@ -384,9 +483,14 @@ def main():
     # 정확도 필터
     parser.add_argument("--no_undistort", action="store_true", help="렌즈 왜곡 보정 끄기")
     parser.add_argument("--no_bilateral", action="store_true", help="bilateral depth filter 끄기")
+    parser.add_argument("--no_inpaint", action="store_true", help="depth 구멍 채우기 끄기")
     parser.add_argument("--no_sor", action="store_true", help="statistical outlier removal 끄기")
     parser.add_argument("--sor_neighbors", type=int, default=20, help="SOR k-nearest neighbors 수")
     parser.add_argument("--sor_std", type=float, default=2.0, help="SOR std_ratio (낮을수록 공격적 제거)")
+
+    # 배경 제거
+    parser.add_argument("--remove_plane", action="store_true", help="RANSAC 배경 평면(테이블/바닥) 제거")
+    parser.add_argument("--plane_dist", type=float, default=0.005, help="평면 distance threshold (m)")
 
     parser.add_argument("--out", type=str, default=None, help="PLY 출력 경로 (기본: capture_dir 내)")
     parser.add_argument("--open3d", action="store_true", help="Open3D 뷰어로 결과 표시")
@@ -417,14 +521,19 @@ def main():
     # --- filter settings ---
     use_undistort = not args.no_undistort
     use_bilateral = not args.no_bilateral
+    use_inpaint = not args.no_inpaint
     use_sor = not args.no_sor
     filters_on = []
+    if use_inpaint:
+        filters_on.append("inpaint")
     if use_undistort:
         filters_on.append("undistort")
     if use_bilateral:
         filters_on.append("bilateral")
     if use_sor:
         filters_on.append(f"SOR(k={args.sor_neighbors},std={args.sor_std})")
+    if args.remove_plane:
+        filters_on.append(f"plane_removal(d={args.plane_dist}m)")
     print(f"[INFO] 필터: {', '.join(filters_on) if filters_on else 'OFF'}")
 
     # --- output directory ---
@@ -448,6 +557,7 @@ def main():
                 args.z_min, args.z_max, args.stride, pad,
                 use_bilateral=use_bilateral, use_undistort=use_undistort,
                 use_sor=use_sor, sor_neighbors=args.sor_neighbors, sor_std=args.sor_std,
+                use_inpaint=use_inpaint,
             )
             if not f_pts:
                 print(f"  -> SKIP (유효 점 없음)\n")
@@ -456,6 +566,10 @@ def main():
 
             P = np.concatenate(f_pts, axis=0)
             C = np.concatenate(f_cols, axis=0)
+
+            # 배경 평면 제거
+            if args.remove_plane:
+                P, C = remove_background_plane(P, C, distance_threshold=args.plane_dist)
 
             if args.voxel_mm > 0:
                 n_before = len(P)
@@ -505,6 +619,11 @@ def main():
     P = np.concatenate(all_pts, axis=0)
     C = np.concatenate(all_cols, axis=0)
     print(f"\n[INFO] 총 포인트: {P.shape[0]:,}")
+
+    # --- 배경 평면 제거 ---
+    if args.remove_plane:
+        P, C = remove_background_plane(P, C, distance_threshold=args.plane_dist)
+        print(f"[INFO] 평면 제거 후: {P.shape[0]:,}")
 
     # --- voxel downsample ---
     if args.voxel_mm > 0:
