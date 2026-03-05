@@ -121,14 +121,20 @@ def load_final_sam3d(path: str) -> Optional[Dict]:
     }
 
 
-def _draw_axes(ax, R, t, length, lw=2.0, alpha=1.0):
+def _draw_axes(ax, R, t, length, lw=2.0, alpha=1.0, axis_mask=(True, True, True), show_labels=False):
     colors = ["#e74c3c", "#27ae60", "#2980b9"]  # X, Y, Z
+    names = ["X", "Y", "Z"]
     for i in range(3):
+        if not axis_mask[i]:
+            continue
         v = R[:, i] * length
         ax.quiver(
             t[0], t[1], t[2], v[0], v[1], v[2],
             color=colors[i], linewidth=lw, arrow_length_ratio=0.12, alpha=alpha
         )
+        if show_labels:
+            tip = t + v * 1.12
+            ax.text(tip[0], tip[1], tip[2], names[i], color=colors[i], fontsize=8, fontweight="bold")
 
 
 def _draw_obb(ax, R, center, extents, color="#c0392b"):
@@ -191,6 +197,87 @@ def _panel(ax, item, radius):
     ax.view_init(elev=24, azim=-55)
 
 
+def _slug(name: str) -> str:
+    return name.lower().replace(" ", "_")
+
+
+def _panel_axis_only(ax, item, radius, axis_idx: Optional[int]):
+    ax.set_xlabel("X (mm)")
+    ax.set_ylabel("Y (mm)")
+    ax.set_zlabel("Z (mm)")
+
+    pos = item["position_mm"]
+    R = item["rotation_matrix"]
+
+    # cam0 reference axes (faded)
+    _draw_axes(ax, np.eye(3), np.zeros(3), 55, lw=2.0, alpha=0.25)
+    ax.text(0, 0, -20, "cam0", fontsize=8, ha="center", alpha=0.6)
+
+    if R is None:
+        ax.scatter([pos[0]], [pos[1]], [pos[2]], c="#c0392b", s=35)
+        ax.text(pos[0], pos[1], pos[2] + 20, "rotation N/A", fontsize=8, ha="center")
+        if axis_idx is None:
+            ax.set_title("All axes (N/A)", fontsize=10, pad=8)
+        else:
+            ax.set_title(f"Axis {['X','Y','Z'][axis_idx]} only (N/A)", fontsize=10, pad=8)
+    else:
+        if axis_idx is None:
+            _draw_axes(ax, R, pos, 50, lw=3.0, alpha=1.0, show_labels=True)
+            title = "All axes (X,Y,Z)"
+        else:
+            mask = [False, False, False]
+            mask[axis_idx] = True
+            _draw_axes(ax, R, pos, 55, lw=4.0, alpha=1.0, axis_mask=tuple(mask), show_labels=True)
+            title = f"Axis {['X','Y','Z'][axis_idx]} only"
+        _draw_obb(ax, R, pos, item["obb_mm"])
+        ax.set_title(title, fontsize=10, pad=8)
+
+    ax.plot3D([0, pos[0]], [0, pos[1]], [0, pos[2]], ":", color="#7f8c8d", lw=1.0, alpha=0.4)
+    c = pos / 2.0
+    ax.set_xlim(c[0] - radius, c[0] + radius)
+    ax.set_ylim(c[1] - radius, c[1] + radius)
+    ax.set_zlim(c[2] - radius, c[2] + radius)
+    ax.view_init(elev=24, azim=-55)
+
+
+def _save_each_axis_views(items, radius, out_dir, show=False):
+    import matplotlib
+    if not show:
+        matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    os.makedirs(out_dir, exist_ok=True)
+    for item in items:
+        fig = plt.figure(figsize=(13, 10))
+        fig.suptitle(f"{item['name']} - Axis Views (cam0-aligned)", fontsize=14, y=0.97)
+
+        # 2x2: all, X, Y, Z
+        ax1 = fig.add_subplot(2, 2, 1, projection="3d")
+        _panel_axis_only(ax1, item, radius, axis_idx=None)
+        ax2 = fig.add_subplot(2, 2, 2, projection="3d")
+        _panel_axis_only(ax2, item, radius, axis_idx=0)
+        ax3 = fig.add_subplot(2, 2, 3, projection="3d")
+        _panel_axis_only(ax3, item, radius, axis_idx=1)
+        ax4 = fig.add_subplot(2, 2, 4, projection="3d")
+        _panel_axis_only(ax4, item, radius, axis_idx=2)
+
+        fig.text(
+            0.5, 0.01,
+            "Axis color: X=Red, Y=Green, Z=Blue | cam0 frame: X-right, Y-down, Z-forward",
+            ha="center",
+            fontsize=9,
+            bbox=dict(boxstyle="round,pad=0.35", fc="#ecf0f1", ec="#bdc3c7"),
+        )
+        fig.tight_layout(rect=[0, 0.05, 1, 0.95])
+        out_path = os.path.join(out_dir, f"{_slug(item['name'])}_axes.png")
+        fig.savefig(out_path, dpi=220, bbox_inches="tight")
+        print(f"[SAVE] {os.path.abspath(out_path)}")
+        if show:
+            plt.show()
+        else:
+            plt.close(fig)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Visualize aligned pose axes for all methods")
     parser.add_argument("--step5_json", default="pose_step5_localize/output/localization_results.json")
@@ -200,6 +287,7 @@ def main():
     parser.add_argument("--grounding_json", default=None, help="default: latest pose_estimate_grounding_sam(최종)/output*/pose_*.json")
     parser.add_argument("--sam3d_json", default=None, help="default: latest pose_estimate_sam3d_knife(최최종)/output/pose_cam0_*.json")
     parser.add_argument("--out", default="pose_axes_comparison.png")
+    parser.add_argument("--out_each_dir", default=None, help="default: <out_basename>_each_axes")
     parser.add_argument("--show", action="store_true")
     args = parser.parse_args()
 
@@ -267,6 +355,11 @@ def main():
     plt.tight_layout(rect=[0, 0.05, 1, 0.95])
     plt.savefig(out_path, dpi=220, bbox_inches="tight")
     print(f"[SAVE] {os.path.abspath(out_path)}")
+
+    base_no_ext = os.path.splitext(out_path)[0]
+    each_dir = args.out_each_dir or (base_no_ext + "_each_axes")
+    _save_each_axis_views(items, radius, each_dir, show=False)
+
     if args.show:
         plt.show()
     else:
@@ -275,4 +368,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

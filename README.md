@@ -151,7 +151,8 @@ src3/
 참고:
 - `Step5_localize`는 **위치 추정 전용**이라 회전축(orientation axis)은 출력하지 않습니다.
 - 축 시각화 이미지는 모두 캘리브레이션으로 정합된 cam0 기준 결과를 사용합니다(단, Step6은 COLMAP 패널도 함께 표시).
-- 전체 방법을 한 장으로 비교하려면 `python visualize_pose_axes_all.py --out ./pose_axes_comparison.png` 를 사용합니다.
+- 전체 방법 비교: `python visualize_pose_axes_all.py --out ./pose_axes_comparison.png`
+- 축 각각(X/Y/Z) 보기: 위 명령 실행 시 `./pose_axes_comparison_each_axes/*.png` 자동 생성
 
 빠른 실행 예시:
 
@@ -194,6 +195,9 @@ python pose_from_sam3d.py \
 # 전체 방법 축 비교 (src3 루트에서 실행)
 cd ..
 python visualize_pose_axes_all.py --out ./pose_axes_comparison.png
+# 생성:
+#   ./pose_axes_comparison.png
+#   ./pose_axes_comparison_each_axes/step6_ply_axes.png (방법별 2x2: ALL/X/Y/Z)
 ```
 
 ### 코드별 입력·모델·결과·회전값 계산 원리 (상세)
