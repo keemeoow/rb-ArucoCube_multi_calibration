@@ -331,7 +331,104 @@ def R_to_quat(R: np.ndarray) -> np.ndarray:
 
 
 # ──────────────────────────────────────────────────────────────────
-#  7. 결과 출력 + 저장
+#  7. 포즈 시각화 (cam0 좌표계)
+# ──────────────────────────────────────────────────────────────────
+def visualize_pose_cam0(pose: dict, out_path: str, title: str):
+    """
+    cam0 + 객체 포즈를 3D 좌표 프레임으로 시각화 저장.
+    축 색상: X=Red, Y=Green, Z=Blue
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+
+    R = pose["R"]
+    pos_mm = pose["centroid_mm"]
+    obb_mm = pose["obb_mm"]
+    blade = pose["blade_axis"]
+    euler = R_to_euler(R)
+    quat = R_to_quat(R)
+
+    fig = plt.figure(figsize=(12, 9))
+    ax = fig.add_subplot(111, projection="3d")
+    ax.set_title(title, fontsize=13, pad=14)
+    ax.set_xlabel("X (mm)")
+    ax.set_ylabel("Y (mm)")
+    ax.set_zlabel("Z (mm)")
+
+    def draw_axes(Rm, t, length, label, lw=2.0, alpha=1.0):
+        colors = ["#e74c3c", "#27ae60", "#2980b9"]
+        names = ["X", "Y", "Z"]
+        for i in range(3):
+            v = Rm[:, i] * length
+            ax.quiver(t[0], t[1], t[2], v[0], v[1], v[2],
+                      color=colors[i], linewidth=lw, arrow_length_ratio=0.12, alpha=alpha)
+            tip = t + v * 1.14
+            ax.text(tip[0], tip[1], tip[2], names[i],
+                    fontsize=7, color=colors[i], fontweight="bold", alpha=alpha)
+        if label:
+            ax.text(t[0], t[1], t[2] - length * 0.4, label,
+                    fontsize=9, fontweight="bold", ha="center")
+
+    def draw_obb(Rm, center, extents, color="#c0392b"):
+        h = extents / 2.0
+        corners_l = np.array([
+            [-h[0], -h[1], -h[2]], [h[0], -h[1], -h[2]],
+            [h[0], h[1], -h[2]], [-h[0], h[1], -h[2]],
+            [-h[0], -h[1], h[2]], [h[0], -h[1], h[2]],
+            [h[0], h[1], h[2]], [-h[0], h[1], h[2]],
+        ])
+        corners = (Rm @ corners_l.T).T + center
+        faces = [[corners[j] for j in f] for f in
+                 [[0,1,2,3],[4,5,6,7],[0,1,5,4],[2,3,7,6],[0,3,7,4],[1,2,6,5]]]
+        ax.add_collection3d(Poly3DCollection(
+            faces, alpha=0.06, facecolor=color, edgecolor=color, linewidth=0.4))
+        edges = [(0,1),(1,2),(2,3),(3,0),(4,5),(5,6),(6,7),(7,4),(0,4),(1,5),(2,6),(3,7)]
+        for i, j in edges:
+            ax.plot3D(*zip(corners[i], corners[j]), color=color, lw=1.0, alpha=0.55)
+
+    draw_axes(np.eye(3), np.zeros(3), 70, "cam0 (ref)", lw=3.0)
+    draw_axes(R, pos_mm, 55, "", lw=3.5)
+    draw_obb(R, pos_mm, obb_mm)
+
+    ax.plot3D([0, pos_mm[0]], [0, pos_mm[1]], [0, pos_mm[2]],
+              ":", color="#c0392b", lw=1.0, alpha=0.35)
+
+    ax.text(pos_mm[0], pos_mm[1] - 45, pos_mm[2] + 70,
+            "Object", fontsize=11, fontweight="bold", color="#c0392b", ha="center")
+    ax.text(pos_mm[0], pos_mm[1] - 45, pos_mm[2] + 52,
+            f"({pos_mm[0]:.1f}, {pos_mm[1]:.1f}, {pos_mm[2]:.1f}) mm",
+            fontsize=8, color="#2c3e50", ha="center")
+    ax.text(pos_mm[0], pos_mm[1] - 45, pos_mm[2] + 35,
+            f"euler ({euler[0]:.1f}, {euler[1]:.1f}, {euler[2]:.1f}) deg",
+            fontsize=8, color="#2c3e50", ha="center")
+    ax.text(pos_mm[0], pos_mm[1] - 45, pos_mm[2] + 18,
+            f"blade axis [{blade[0]:+.2f}, {blade[1]:+.2f}, {blade[2]:+.2f}]",
+            fontsize=7, color="#2c3e50", ha="center")
+
+    pts = np.array([[0, 0, 0], pos_mm.tolist()], dtype=np.float64)
+    c = pts.mean(axis=0)
+    r = max((pts.max(axis=0) - pts.min(axis=0)).max() / 2 * 1.4, 120.0)
+    ax.set_xlim(c[0] - r, c[0] + r)
+    ax.set_ylim(c[1] - r, c[1] + r)
+    ax.set_zlim(c[2] - r, c[2] + r)
+    ax.view_init(elev=24, azim=-55)
+
+    fig.text(
+        0.5, 0.01,
+        "Axis color: X=Red  Y=Green  Z=Blue\n"
+        f"Quat wxyz: ({quat[0]:.4f}, {quat[1]:.4f}, {quat[2]:.4f}, {quat[3]:.4f})",
+        fontsize=8, ha="center",
+        bbox=dict(boxstyle="round,pad=0.4", fc="#ecf0f1", ec="#bdc3c7"),
+    )
+    plt.tight_layout(rect=[0, 0.05, 1, 0.96])
+    fig.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+
+# ──────────────────────────────────────────────────────────────────
+#  8. 결과 출력 + 저장
 # ──────────────────────────────────────────────────────────────────
 def print_and_save(pose: dict, out_dir: str, tag: str, elapsed: float):
     R   = pose["R"]
@@ -375,11 +472,23 @@ def print_and_save(pose: dict, out_dir: str, tag: str, elapsed: float):
     with open(json_path, "w") as f:
         json.dump(result, f, indent=2, ensure_ascii=False)
     print(f"  [저장] {json_path}")
+
+    vis_path = os.path.join(out_dir, f"pose_cam0_{tag}.png")
+    try:
+        visualize_pose_cam0(
+            pose,
+            vis_path,
+            "pose_from_sam3d (cam0 frame, mm)",
+        )
+        print(f"  [저장] {vis_path}")
+    except Exception as e:
+        print(f"  [WARN] 시각화 저장 실패: {e}")
+
     return result
 
 
 # ──────────────────────────────────────────────────────────────────
-#  8. Main
+#  9. Main
 # ──────────────────────────────────────────────────────────────────
 def main():
     ap = argparse.ArgumentParser(
