@@ -1,7 +1,7 @@
 # ArucoCube Multi-Camera Calibration
 
-RealSense 다중 카메라 + ArUco 큐브 기반 캘리브레이션과 객체 포즈 추정을 다룹니다.  
-루트 README는 `src2`(기준 파이프라인)와 `src3`(개선판 + 포즈 추정 확장)를 분리해 설명합니다.
+RealSense 다중 카메라 + ArUco 큐브 기반 캘리브레이션과 객체 포즈 추정을 다룹니다.
+루트 README는 `src2`(기준 파이프라인)와 `src3`(depth 포함 개선판 + 포즈 추정)를 분리해 설명합니다.
 
 ## 준비 사항
 
@@ -9,7 +9,7 @@ RealSense 다중 카메라 + ArUco 큐브 기반 캘리브레이션과 객체 �
 - `librealsense` / 드라이버 설치
 - Python 환경 준비 (`pyrealsense2`, OpenCV, NumPy, matplotlib 등)
 
-## 환경 생성 (Conda)
+## 가상 환경 생성 (Conda)
 
 프로젝트 루트에서:
 
@@ -17,10 +17,6 @@ RealSense 다중 카메라 + ArUco 큐브 기반 캘리브레이션과 객체 �
 conda env create -f "conda env/environment.yml"
 conda activate multicam_cube
 ```
-
-참고:
-- 환경에 따라 `cv2.aruco`가 없을 수 있습니다.
-- 이 경우 `opencv-contrib-python` 계열 설치가 필요할 수 있습니다.
 
 ## src2: 기준 캘리브레이션 파이프라인 (Step1~4)
 
@@ -72,189 +68,148 @@ python Step4_fuse_depth_to_ref_pcd.py \
   --eval_icp
 ```
 
-## src3: src2 개선 + 객체 포즈 추정
+## src3: src2 depth 포함 개선판 + 포즈 추정
 
 ### src2 대비 캘리브레이션 개선 내용 (Step1~4 인프라 유지)
 
 `src3`는 `src2`의 파이프라인을 유지하면서 캘리브레이션 운용 안정성을 강화
 
 - `Step2_capture_multi_cam.py`: depth align on/off, 카메라 timeout/error 로깅, 주기적 카메라 통계 출력 옵션 추가
-- `camera.py`: 카메라 시작 재시도, 시작 실패 시 하드웨어 리셋 옵션, warmup/timeout 제어 및 스트림 health 카운터 추가
-- `aruco_cube.py`: depth 역투영 기반 3D-3D 정합(`depth_svd`) + PnP fallback 지원
+- `_camera.py`: 카메라 시작 재시도, 시작 실패 시 하드웨어 리셋 옵션, warmup/timeout 제어 및 스트림 health 카운터 추가
+- `_aruco_cube.py`: depth 역투영 기반 3D-3D 정합(`depth_svd`) + PnP fallback 지원
 - `Step4_fuse_depth_to_ref_pcd.py`: best-frame 자동선택, ROI 기반 depth 융합, 멀티프레임 depth fusion, NumPy-only PLY 저장 보강
 
-### 객체 포즈 추정 디렉터리 구조 (최신)
+### src3 디렉터리 구조
 
 ```text
 src3/
-├── pose_step5_localize/                  ← GroundingDINO+SAM2 3D 위치 추정
-│   └── Step5_localize_object_3d.py
-├── pose_step6_ply/                       ← PLY 기반 ICP 포즈 추정
-│   ├── Step6_estimate_pose_from_ply.py
-│   └── visualize_pose.py
-├── pose_step7_direct/                    ← RGB-D 직접 포즈 추정
-│   └── Step7_direct_pose_from_rgbd.py
-├── pose_estimate_grounding_sam(최종)/    ← GDino+SAM2 6DoF + Isaac 변환
-│   └── estimate_object_pose.py
-├── pose_estimate_sam3d_knife(최최종)/    ← SAM3D/scene PLY 기반 고속 포즈
-│   └── pose_from_sam3d.py
 │
-├── capture_rgbd_3cam.py                  ← RGB-D 캡처 유틸
-├── reconstruct_3d.py                     ← 프레임 단위 재구성 유틸
-├── reconstruct_sam3d_multicam.py         ← SAM3D 멀티캠 재구성 유틸
-├── convert_pose_to_isaac.py              ← 좌표계 변환 유틸
-├── Step1~4*.py                           ← 캘리브레이션 인프라
+│  ── 캘리브레이션 파이프라인 (Step1~4) ──
+├── Step1_dump_intrinsics.py                            ← 카메라 내부파라미터 저장
+├── Step2_capture_multi_cam.py                          ← ArUco 큐브 다중 캡처
+├── Step3_calibrate_multi_cam_cube.py                   ← 큐브 기반 외부파라미터 추정
+├── Step4_fuse_depth_to_ref_pcd.py                      ← ref 카메라 기준 depth 융합
+│
+│  ── 캘리브레이션 시각화 (Step5) ──
+├── Step5-1_visualize_3d_cube.py                        ← 큐브+카메라 PnP 3D 시각화
+├── Step5-2_visualize_3d_refcam.py                      ← 전체 프레임 PnP scatter 시각화
+├── visualize_calibration.py                            ← T_C0_Ci 캘리브레이션 결과 시각화
+│
+│  ── 물체 포즈 추정 파이프라인 (Obj_Step1~3) ──
+├── Obj_Step1_capture_rgbd_3cam.py                      ← 물체 촬영 (3카메라 RGBD)
+├── Obj_Step2-(1)_pose_estimate_grounding_sam/           ← 포즈 추정 방법1: GDino+SAM2+ICP
+│   └── Obj_Step2-(1)_pose_grounding_sam.py
+├── Obj_Step2-(2)_pose_estimate_sam3d/                   ← 포즈 추정 방법2: PCA+색상
+│   └── Obj_Step2-(2)_pose_sam3d.py
+├── Obj_Step3_visualize_object_pose.py                  ← 포즈 추정 결과 비교 시각화
+│
+│  ── 내부 모듈 ──
+├── _aruco_cube.py                                      ← ArUco 큐브 모델/타겟
+├── _camera.py                                          ← RealSense 카메라 제어
+├── _utils_pose.py                                      ← 포즈 유틸 (quaternion 등)
+│
+│  ── 참고용 / 미사용 ──
+├── (x) pose_not_used/                                  ← 이전 포즈 추정 코드 (참고용)
+├── (x) arucocube_test/                                 ← ArUco 큐브 테스트/진단
+├── (x) object_to_3d/                                   ← 3D 재구성 유틸
+│
 ├── data/
-├── intrinsics/
-└── checkpoints/
+│   ├── _intrinsics/                                    ← 카메라 내부파라미터
+│   ├── cube_session_01/                                ← 캘리브레이션 세션 데이터
+│   │   └── calib_out_cube/                             ← T_C0_C{1,2}.npy, T_C0_Ci_all.json
+│   ├── object_capture/                                 ← 물체 촬영 RGB-D 데이터
+│   └── 3d_ply/                                         ← 3D 모델/점군 PLY
+└── checkpoints/                                        ← 모델 체크포인트 (SAM2 등)
 ```
 
-### 포즈 추정 코드 설명
+### 포즈 추정 파이프라인
 
-- `pose_step5_localize/Step5_localize_object_3d.py`
-  - GroundingDINO + SAM2 검출/분할 후, 마스크 depth를 역투영해 객체 3D 위치를 추정합니다.
-  - 필수 인자: `--capture_dir`, `--calib_dir`, `--text_prompt`
-  - 출력: `localization_results.json`, `annotated_cam*_frame*.jpg`, (옵션) 객체 PLY
+#### 전체 흐름
 
-- `pose_step6_ply/Step6_estimate_pose_from_ply.py`
-  - `SAM3D/COLMAP/GS2Mesh` PLY를 ICP로 cam0 좌표계에 정합합니다.
-  - `--calib_dir --intrinsics_dir --rgbd_dir` 조합(권장) 또는 `--T_multicam_colmap` 재사용을 지원합니다.
-  - 출력: `pose_estimation_results.json`, `T_cam0_colmap.npy`, 정합된 cam0 기준 PLY
+```
+Obj_Step1: 물체 촬영  (capture_rgbd_3cam.py)
+         ↓
+   data/object_capture/cam{0,1,2}/rgb,depth
+         ↓
+   + data/cube_session_01/calib_out_cube/T_C0_C{1,2}.npy  (캘리브레이션)
+   + data/_intrinsics/cam{0,1,2}.npz                       (내부파라미터)
+         ↓
+Obj_Step2: 포즈 추정 (2가지 방법 중 선택)
+   ┌────────────────────────────────────────────────────────┐
+   │ (1) Obj_Step2-(1)_pose_grounding_sam.py               │  ← GDino+SAM2+ICP
+   │ (2) Obj_Step2-(2)_pose_sam3d.py                       │  ← PCA+색상
+   └────────────────────────────────────────────────────────┘
+         ↓
+   pose JSON (position_mm + rotation_matrix, cam0 OpenCV 좌표계)
+         ↓
+Obj_Step3: 결과 시각화  (Obj_Step3_visualize_object_pose.py)
+   → 포인트 클라우드 + OBB + 좌표축 + Euler 회전각 비교
+```
 
-- `pose_step7_direct/Step7_direct_pose_from_rgbd.py`
-  - ML 모델 없이 RGB-D만으로 직접 포즈를 추정합니다.
-  - `--ref_ply`를 주면 ICP 회전(권장), 없으면 PCA 회전(180도 모호성 존재)으로 동작합니다.
-  - 출력: `pose_frame*.json`, `pose_frame*.png`, `cam0_fused_frame*.ply`, `object_frame*.ply`
-
-- `pose_estimate_grounding_sam(최종)/estimate_object_pose.py` (최종 6DoF 파이프라인)
-  - GroundingDINO + SAM2 + 멀티카메라 depth 융합 + ICP로 6DoF 포즈를 추정합니다.
-  - `--ref_ply` 또는 `--ref_frames` 중 하나를 필수로 받아 레퍼런스 점군을 구성합니다.
-  - 출력: cam0/OpenCV 좌표계 + Isaac(USD) 좌표계 JSON, 검출 이미지, 3D 시각화
-
-- `pose_estimate_sam3d_knife(최최종)/pose_from_sam3d.py`
-  - Mode B: 기존 `--scene_ply`를 바로 사용해 PCA 직접 포즈 추정
-  - Mode A: GDino+SAM2 재검출 + 멀티캠 융합 후 PCA 직접 포즈 추정
-  - 색상 기반 blade 방향 판별(`--blade_dir auto/pos/neg`)을 지원합니다.
-
-### 포즈 축/회전축 시각화 방법 (정합 좌표계 확인)
-
-기본 좌표축 색상은 공통으로 `X=Red, Y=Green, Z=Blue`입니다.
-
-| 코드 | 좌표계 | 시각화 생성 방법 | 생성 파일 |
-|------|--------|------------------|-----------|
-| Step5_localize | ref(cam0) 위치만 | `annotated` 이미지(2D bbox/mask/거리) 확인 | `pose_step5_localize/output/annotated_cam*_frame*.jpg` |
-| Step6_ply | cam0 + COLMAP | Step6 실행 후 `python visualize_pose.py` 실행 | `pose_step6_ply/output/pose_visualization.png` |
-| Step7_direct | cam0 | Step7 실행 시 자동 저장 | `pose_step7_direct/output/pose_frameXXXXXX.png` |
-| estimate_object_pose(최종) | cam0 + Isaac | 실행 시 자동 저장 | `pose_estimate_grounding_sam(최종)/output*/pose_3d_frameXXXXXX.png` |
-| pose_from_sam3d(최최종) | cam0 | 실행 시 자동 저장 | `pose_estimate_sam3d_knife(최최종)/output/pose_cam0_*.png` |
-
-참고:
-- `Step5_localize`는 **위치 추정 전용**이라 회전축(orientation axis)은 출력하지 않습니다.
-- 축 시각화 이미지는 모두 캘리브레이션으로 정합된 cam0 기준 결과를 사용합니다(단, Step6은 COLMAP 패널도 함께 표시).
-- 전체 방법 비교: `python visualize_pose_axes_all.py --out ./pose_axes_comparison.png`
-- 축 각각(X/Y/Z) 보기: 위 명령 실행 시 `./pose_axes_comparison_each_axes/*.png` 자동 생성
-
-빠른 실행 예시:
+#### Obj_Step1. 물체 촬영
 
 ```bash
 cd src3
-
-# Step6 축 시각화
-cd pose_step6_ply
-python Step6_estimate_pose_from_ply.py \
-  --object_ply ../data/3d_ply/tiger.ply \
-  --scene_ply ../data/3d_ply/point_cloud_cleaned.ply \
-  --mesh_ply "../data/3d_ply/tiger_figure_custom_nw_iterations30000_DLNR_Middlebury_baseline7_0p_mask0_occ1_scale1_0_voxel2_512_trunc4_20_cleaned_mesh.ply" \
-  --calib_dir ../data/cube_session_01/calib_out_cube \
-  --intrinsics_dir ../intrinsics \
-  --rgbd_dir ../data/rgbd_capture
-python visualize_pose.py
-
-# Step7 축 시각화 (자동)
-cd ../pose_step7_direct
-python Step7_direct_pose_from_rgbd.py \
-  --rgbd_dir ../data/rgbd_capture \
-  --calib_dir ../data/cube_session_01/calib_out_cube \
-  --ref_ply ../data/3d_ply/tiger.ply \
-  --frame 0
-
-# 최종(grounding_sam) 축 시각화 (자동)
-cd "../pose_estimate_grounding_sam(최종)"
-python estimate_object_pose.py \
-  --capture_dir ../data/rgbd_capture \
-  --calib_dir ../data/cube_session_01/calib_out_cube \
-  --text_prompt "tiger figure." \
-  --ref_ply ../data/3d_ply/tiger.ply \
-  --device mps
-
-# 최최종(sam3d_knife) 축 시각화 (자동)
-cd "../pose_estimate_sam3d_knife(최최종)"
-python pose_from_sam3d.py \
-  --scene_ply "../pose_estimate_grounding_sam(최종)/output_selfref/object_utility_knife_frame000005.ply"
-
-# 전체 방법 축 비교 (src3 루트에서 실행)
-cd ..
-python visualize_pose_axes_all.py --out ./pose_axes_comparison.png
-# 생성:
-#   ./pose_axes_comparison.png
-#   ./pose_axes_comparison_each_axes/step6_ply_axes.png (방법별 2x2: ALL/X/Y/Z)
+python Obj_Step1_capture_rgbd_3cam.py --save_dir ./data/object_capture
 ```
 
-### 코드별 입력·모델·결과·회전값 계산 원리 (상세)
+- 3대 RealSense로 RGB+Depth 동시 촬영
+- `SPACE`: 프레임 저장, `s`: 연속 저장 모드, `ESC/q`: 종료
 
-아래에서 `정합 좌표계`는 기본적으로 `cam0(OpenCV: X-right, Y-down, Z-forward)`를 의미합니다.
+#### Obj_Step2-(1). 포즈 추정: grounding_sam (6DoF, ICP 기반)
 
-#### 1) Step5_localize (위치 전용)
+```bash
+cd "Obj_Step2-(1)_pose_estimate_grounding_sam"
+python "Obj_Step2-(1)_pose_grounding_sam.py" \
+  --capture_dir ../data/object_capture \
+  --calib_dir ../data/cube_session_01/calib_out_cube \
+  --text_prompt "utility knife." \
+  --ref_ply ../data/3d_ply/tiger.ply \
+  --device mps
+```
 
-- 입력 데이터
-  - `capture_dir/cam{0,1,2}/rgb_*.jpg`, `depth_*.png`
-  - `calib_dir/T_C0_Ci.npy`, `intrinsics_dir/cam{i}.npz`
-  - `text_prompt`
-- 사용 모델
-  - GroundingDINO + SAM2
-- 결과
-  - `localization_results.json`
-  - `annotated_cam*_frame*.jpg`
-  - (옵션) `object_*_frame*.ply`
-- 원리
-  - 카메라별로 `mask × depth`를 3D 역투영해 centroid를 구합니다.
-  - 카메라별 centroid를 `T_C0_Ci`로 cam0에 정합한 뒤, 유효 depth 픽셀 수로 가중 평균합니다.
-  - 보조로 N-view DLT 삼각측량을 계산해 depth 기반 위치와 불일치(mm)를 함께 기록합니다.
-  - 회전값은 계산하지 않습니다.
+- GDino+SAM2로 물체 검출 → 마스크×Depth 3카메라 융합 → PCA 4조합×ICP로 6DoF 포즈
+- 출력: `pose_<object>_frameXXXXXX.json` (cam0 + Isaac 좌표계), `object_*.ply`
 
-#### 2) Step6_ply (PLY 정합 기반)
+#### Obj_Step2-(2). 포즈 추정: sam3d (고속, PCA 기반)
 
-- 입력 데이터
-  - `object_ply`(SAM3D), `scene_ply`(COLMAP), `mesh_ply`(gs2mesh)
-  - 권장: `calib_dir + intrinsics_dir + rgbd_dir`로 cam0 브릿지 추정
-- 사용 모델
-  - 딥러닝 모델 없음(기하 기반): PCA, Umeyama(similarity), ICP(point-to-point)
-- 결과
-  - `pose_estimation_results.json`, `T_cam0_colmap.npy`
-  - `*_in_cam0.ply`, `sam3d_aligned_to_colmap.ply`
-  - `pose_visualization.png`(별도 `visualize_pose.py`)
-- 회전 원리
-  - 각 점군의 PCA 주축으로 초기 회전축을 만들고, 축 부호 모호성(180도)을 flip 조합으로 탐색합니다.
-  - Umeyama로 scale+R+t 초기 정합 후 ICP로 미세 정합해 RMSE 최소 해를 선택합니다.
-  - 최종 회전행렬을 Euler/Quaternion/Axis-Angle로 변환해 저장합니다.
+```bash
+cd "Obj_Step2-(2)_pose_estimate_sam3d"
 
-#### 3) Step7_direct (RGB-D 직접 포즈)
+# Mode B: 기존 추출 PLY 사용 (빠름)
+python "Obj_Step2-(2)_pose_sam3d.py" \
+  --scene_ply "../Obj_Step2-(1)_pose_estimate_grounding_sam/output_selfref/object_utility_knife_frame000005.ply"
 
-- 입력 데이터
-  - `rgbd_dir/cam{0,1,2}/rgb,depth`
-  - `calib_dir/T_C0_Ci.npy`, `intrinsics_dir/cam{i}.npz`
-  - 선택: `ref_ply`(CAD)
-- 사용 모델
-  - 딥러닝 모델 없음(순수 NumPy/OpenCV)
-- 결과
-  - `pose_frameXXXXXX.json`, `pose_frameXXXXXX.png`
-  - `cam0_fused_frameXXXXXX.ply`, `object_frameXXXXXX.ply`
-- 회전 원리
-  - 공통 전처리: depth 역투영 → cam0 융합 → 평면 제거(RANSAC) → 객체 클러스터 추출
-  - `--ref_ply` 없음: 객체 점군 공분산 고유벡터(PCA)로 회전축 추정 (180도 모호성 존재)
-  - `--ref_ply` 있음: PCA 초기화 후 4개 부호 조합 × ICP 수행, 최소 RMSE 회전을 선택해 모호성 해소
+# Mode A: GDino+SAM2 재검출
+python "Obj_Step2-(2)_pose_sam3d.py" --frame 5 --device mps
+```
 
-#### 4) estimate_object_pose (최종 6DoF)
+- PCA 주축 + 색상 기반 180도 방향 판별 (CAD 모델 불필요)
+- 출력: `pose_cam0_*.json`, `pose_cam0_*.png`
+
+#### Obj_Step3. 포즈 결과 시각화
+
+```bash
+cd src3
+python Obj_Step3_visualize_object_pose.py
+
+# 또는 특정 파일 지정
+python Obj_Step3_visualize_object_pose.py \
+  --grounding_json "Obj_Step2-(1)_pose_estimate_grounding_sam/output_frame000005/pose_utility_knife_frame000005.json" \
+  --sam3d_json "Obj_Step2-(2)_pose_estimate_sam3d/output_frame000005/pose_cam0_object_utility_knife_frame000005.json"
+```
+
+시각화 내용:
+- 물체 포인트 클라우드 (색상 포함)
+- OBB (Oriented Bounding Box) — 물체 회전 방향을 직관적으로 표시
+- 좌표축 (X=Red, Y=Green, Z=Blue)
+- Euler XYZ 회전각도, 위치(mm), 거리 표시
+- cam0 원점 기준 좌표계
+- 방법별 2x2 개별 축 시각화 (ALL/X/Y/Z) 자동 생성
+
+### 포즈 추정 코드 상세
+
+#### 1) Obj_Step2-(1) grounding_sam (최종 6DoF)
 
 - 입력 데이터
   - `capture_dir` RGB-D, `calib_dir`, `intrinsics_dir`, `text_prompt`
@@ -265,129 +220,67 @@ python visualize_pose_axes_all.py --out ./pose_axes_comparison.png
 - 결과
   - `pose_<object>_frameXXXXXX.json` (cam0 + Isaac 좌표계 모두 저장)
   - `pose_3d_frameXXXXXX.png`, `detected_cam*_frame*.jpg`, `object_*.ply`
-  - `--ref_frames` 사용 시 `self_ref_*.ply` 자동 생성 가능
-- 회전 원리(핵심)
-  - SAM2 마스크로 얻은 멀티카메라 객체 점군을 cam0으로 융합 후 정규화합니다.
-  - 레퍼런스 점군도 정규화하여 PCA 주축 정렬을 초기값으로 생성합니다.
-  - PCA 축 부호 4조합 각각에 대해 ICP를 실행하고, normalized RMSE 최소 조합을 채택합니다.
-  - 선택된 회전행렬을 cam0 포즈로 저장하고, 추가로 Isaac(USD) 좌표계로 변환 저장합니다.
+- 회전 원리
+  - SAM2 마스크로 얻은 멀티카메라 객체 점군을 cam0으로 융합 후 정규화
+  - PCA 축 부호 4조합 × ICP → normalized RMSE 최소 조합 채택
+  - cam0 포즈 + Isaac(USD) 좌표계 변환 저장
 
-#### 5) pose_from_sam3d (최최종, 칼 특화 고속)
+#### 2) Obj_Step2-(2) sam3d (고속, 칼 특화)
 
 - 입력 데이터
   - Mode B: `--scene_ply` (이미 추출된 물체 점군)
-  - Mode A: RGB-D + 캘리브레이션 + `text_prompt` (내부적으로 GDino+SAM2 재검출)
+  - Mode A: RGB-D + 캘리브레이션 + `text_prompt`
 - 사용 모델
-  - Mode B: 모델 없음 (기하 기반)
-  - Mode A: GroundingDINO + SAM2 (점군 생성 단계에서만 사용)
+  - Mode B: 모델 없음 (기하 기반), Mode A: GDino+SAM2
 - 결과
   - `pose_cam0_*.json`, `pose_cam0_*.png`
 - 회전 원리
-  - 객체 점군 PCA에서 `length axis(최대 고유값)`, `normal axis(최소 고유값)`를 얻습니다.
-  - normal은 카메라 기준 위쪽 방향으로 부호를 고정합니다.
-  - blade 방향은 색상 기반 자동 판별(또는 `--blade_dir pos/neg` 수동)로 180도 모호성을 해소합니다.
-  - `width axis = cross(normal, length)`로 오른손 좌표계를 완성해 회전행렬을 구성합니다.
+  - PCA length/normal axis 추출 → 색상 기반 180도 방향 판별
+  - `width = cross(normal, length)` 오른손 좌표계 구성
 
-### 포즈 추정 코드 원리 및 결과
+### 포즈 추정 원리 요약표
 
-각 코드의 위치/회전 추정 원리와 실측 기반 정확도를 정리합니다.
-테스트 물체: RealSense D415 3대, 칼(utility knife), frame 5 기준.
+| 코드 | 검출 방식 | 위치 추정 | 회전 추정 |
+|------|-----------|-----------|-----------|
+| Obj_Step2-(1) grounding_sam | GDino+SAM2 | 멀티캠 fusion centroid | PCA 4조합 × ICP + ref_ply |
+| Obj_Step2-(2) sam3d | GDino+SAM2 또는 PLY 직접 | PLY centroid | PCA + 색상 방향 판별 |
 
-#### 원리 요약표
+### 정확도
 
-| 코드 | 검출 방식 | 점군 획득 | 위치 추정 | 회전 추정 |
-|------|-----------|-----------|-----------|-----------|
-| Step5_localize | GDino+SAM2 | 마스크×Depth 역투영 | 멀티뷰 depth centroid + N-view DLT 삼각측량 | **없음** |
-| Step6_ply | 없음 (PLY 직접 입력) | SAM3D/COLMAP/gs2mesh PLY | PLY centroid | PCA → Umeyama + ICP (scale 포함) |
-| Step7_direct | 없음 (depth 전체) | RANSAC 평면 제거 + BFS 클러스터링 | 점군 centroid | PCA (180° 모호성) 또는 ICP + CAD 모델 |
-| estimate_object_pose | GDino+SAM2 | 마스크×Depth 3카메라 융합 | 멀티캠 융합 centroid | PCA 4조합 × ICP + ref_ply → RMSE 최솟값 선택 |
-| pose_from_sam3d (최최종) | GDino+SAM2 또는 scene PLY 직접 | scene PLY (기생성) | scene PLY centroid | PCA + 색상 기반 180° 방향 판별 |
+| 코드 | 위치 | 회전 | 비고 |
+|------|------|------|------|
+| Obj_Step2-(1) (+ ref_ply) | ±2~3 mm | ±3~8° | 복잡한 형태 물체에 적합 |
+| Obj_Step2-(2) | ±2~3 mm | ±3~8° | 긴 단순 형태(칼 등)에 적합, CAD 불필요 |
 
-#### 위치(Position) 정확도
-
-| 코드 | 정확도 | 비고 |
-|------|--------|------|
-| estimate_object_pose | ±2~3 mm | SAM2 정밀 마스크 × 3카메라 depth 융합 |
-| Step5_localize | ±2~3 mm | 동일 SAM2 마스크, DLT 삼각측량 병행 |
-| pose_from_sam3d (최최종) | ±2~3 mm | scene PLY(이미 SAM2로 생성) centroid 사용 |
-| Step7_direct | ±3~5 mm | ML 없이 depth 전체 사용 → 클러스터 경계 오차 |
-| Step6_ply | ±5~10 mm | COLMAP/SAM3D PLY 좌표계 변환 누적 오차 |
-
-#### 회전(Rotation) 정확도
-
-| 코드 | 정확도 | 비고 |
-|------|--------|------|
-| estimate_object_pose (+ ref_ply) | ±3~8° | SAM2 정밀 마스크 + 4조합 ICP → 180° 모호성 해결, CAD 형태로 정답 판별. 단, 부분 뷰 vs 완전 모델 불일치 시 ICP 불안정 가능 |
-| pose_from_sam3d (최최종) | ±3~8° | 긴 물체(칼 등)에서 PCA 주축이 명확(aspect ratio 5.3), 색상 분석으로 날/손잡이 방향 판별. CAD 모델 불필요 |
-| Step7_direct (+ ref_ply) | ±5~10° | CAD ICP 지원하나, ML 없이 추출한 점군에 노이즈 혼입 가능 |
-| Step6_ply | ±5~15° | Umeyama(scale 포함) + ICP 수행하나, PLY 좌표계 변환 오차 누적 |
-| Step7_direct (PCA만) | ±5~15° | ref_ply 없이 동작하나 180° 모호성 미해결 |
-| Step5_localize | 불가 | 위치 추정 전용, 회전값 미출력 |
-
-#### 결론
-
-**일반 물체 (tiger figure 등 복잡한 형태):**
-- `estimate_object_pose` + `ref_ply` 사용이 가장 정확합니다.
-- SAM2 정밀 마스크 기반 3카메라 점군 + 4조합 PCA ICP로 180° 모호성 없는 6DoF 포즈를 획득합니다.
-
-**긴 단순 형태 물체 (칼, 봉 등):**
-- `pose_from_sam3d (최최종)` 이 동급 정확도를 제공하며 실행 속도가 훨씬 빠릅니다(~0.1초).
-- PCA 주축이 형태에서 명확히 도출되고, 색상 분석으로 방향 판별이 가능하므로 CAD 모델 없이도 신뢰할 수 있습니다.
-
-**위치만 필요할 때:**
-- `Step5_localize` 로 충분합니다. DLT 삼각측량과 depth centroid를 이중으로 검증해 가장 안정적인 3D 위치를 출력합니다.
-
-### src3 변경 사항
-
-- 5개 포즈 추정 방법(Step5/6/7 + `pose_estimate_grounding_sam(최종)` + `pose_estimate_sam3d_knife(최최종)`)으로 정리
-- 각 스크립트 기본 경로를 `../` 기준으로 통일 (`intrinsics`, `checkpoints`, `out_dir`)
-- `pose_step6_ply/visualize_pose.py` 하드코딩 경로를 `os.path` 기반 상대경로로 변경
-- `estimate_object_pose.py`에 `--ref_ply` / `--ref_frames` 상호배타 입력 지원
-- `pose_from_sam3d.py`에 `scene_ply` 직접 입력(Mode B) + 재검출(Mode A) 이중 모드 지원
-- 포즈 추정 스크립트 Python 문법 검증 완료
-
-### src3 실행 방법
-
-- 공통: `cd src3` 후 각 폴더에서 실행
-- 입력 데이터 기본 경로: `../data/...`, 내부파라미터: `../intrinsics`, 모델 체크포인트: `../checkpoints`
+### 캘리브레이션 시각화
 
 ```bash
-# Step5: 위치 추정
-cd pose_step5_localize
-python Step5_localize_object_3d.py \
-  --capture_dir ../data/rgbd_capture \
-  --calib_dir ../data/cube_session_01/calib_out_cube \
-  --text_prompt "tiger figure."
+cd src3
 
-# Step6: PLY 기반 ICP
-cd ../pose_step6_ply
-python Step6_estimate_pose_from_ply.py \
-  --object_ply ../data/3d_ply/tiger.ply \
-  --scene_ply ../data/3d_ply/point_cloud_cleaned.ply \
-  --mesh_ply "../data/3d_ply/tiger_figure_custom_nw_iterations30000_DLNR_Middlebury_baseline7_0p_mask0_occ1_scale1_0_voxel2_512_trunc4_20_cleaned_mesh.ply" \
-  --calib_dir ../data/cube_session_01/calib_out_cube \
-  --intrinsics_dir ../intrinsics \
-  --rgbd_dir ../data/rgbd_capture
+# PnP 기반 (큐브 원점, 카메라 위치 확인)
+python Step5-1_visualize_3d_cube.py \
+  --root_folder ./data/cube_session_01 \
+  --intrinsics_dir ./data/_intrinsics \
+  --save
 
-# Step7: RGB-D 직접 포즈 (ICP)
-cd ../pose_step7_direct
-python Step7_direct_pose_from_rgbd.py \
-  --rgbd_dir ../data/rgbd_capture \
-  --calib_dir ../data/cube_session_01/calib_out_cube \
-  --ref_ply ../data/3d_ply/tiger.ply \
-  --frame 0
+# 전체 프레임 PnP scatter (캘리브레이션 일관성 확인)
+python Step5-2_visualize_3d_refcam.py \
+  --root_folder ./data/cube_session_01 \
+  --intrinsics_dir ./data/_intrinsics \
+  --save
 
-# 최종 6DoF: ref_ply 기반
-cd ../pose_estimate_grounding_sam\(최종\)
-python estimate_object_pose.py \
-  --capture_dir ../data/rgbd_capture \
-  --calib_dir ../data/cube_session_01/calib_out_cube \
-  --text_prompt "tiger figure." \
-  --ref_ply ../data/3d_ply/tiger.ply \
-  --device mps
-
-# 고속 최종(칼): scene PLY 직접
-cd ../pose_estimate_sam3d_knife\(최최종\)
-python pose_from_sam3d.py \
-  --scene_ply ../pose_estimate_grounding_sam\(최종\)/output_selfref/object_utility_knife_frame000005.ply
+# 캘리브레이션 결과 (cam0 원점, T_C0_Ci 확인)
+python visualize_calibration.py \
+  --root_folder ./data/cube_session_01 \
+  --intrinsics_dir ./data/_intrinsics \
+  --ref_cam_idx 0 \
+  --save
 ```
+
+### 이전 포즈 추정 코드 (`(x) pose_not_used/`)
+
+아래 코드들은 개발 과정에서 사용했으나 현재는 위 2가지 최종 방법으로 대체되어 참고용으로 보관됩니다.
+
+- `pose_step5_localize/Step5_localize_object_3d.py`: 위치 전용 (회전 미추정)
+- `pose_step6_ply/Step6_estimate_pose_from_ply.py`: PLY 정합 기반 ICP
+- `pose_step7_direct/Step7_direct_pose_from_rgbd.py`: ML 없이 RGB-D 직접 포즈

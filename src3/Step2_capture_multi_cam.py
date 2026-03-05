@@ -28,8 +28,8 @@ from typing import Dict
 
 import cv2
 
-from camera import RealSenseCamera
-from aruco_cube import CubeConfig, ArucoCubeTarget
+from src3._camera import RealSenseCamera
+from src3._aruco_cube import CubeConfig, ArucoCubeTarget
 
 
 def ensure_dir(p: str) -> str:

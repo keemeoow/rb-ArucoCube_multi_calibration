@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip3 list)",
+      "Bash(pip list)",
+      "Bash(ls /Users/woo/Documents/GitHub/Robot-Lab/rb-ArucoCube_multi_calibration/src3/Obj_Step2*/)",
+      "Bash(ls /Users/woo/Documents/GitHub/Robot-Lab/rb-ArucoCube_multi_calibration/src3/Obj_Step*.py)"
+    ]
+  }
+}

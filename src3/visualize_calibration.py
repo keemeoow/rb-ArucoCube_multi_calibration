@@ -6,7 +6,7 @@ Step3에서 저장된 T_C0_Ci 행렬을 로드하여 카메라 배치를 3D 시�
 실행:
   python visualize_calibration.py \
     --root_folder ./data/cube_session_01 \
-    --intrinsics_dir ./intrinsics \
+    --intrinsics_dir ./data/_intrinsics \
     --ref_cam_idx 0
 """
 
@@ -21,7 +21,7 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D          # noqa: F401
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
-from aruco_cube import CubeConfig, ArucoCubeModel, ArucoCubeTarget
+from src3._aruco_cube import CubeConfig, ArucoCubeModel, ArucoCubeTarget
 
 
 CAM_COLORS  = ["tab:blue", "tab:orange", "tab:green", "tab:red", "tab:purple"]
@@ -160,10 +160,21 @@ def main():
     parser.add_argument("--save",           action="store_true")
     args = parser.parse_args()
 
+    # T_C0_Ci_all.json 찾기 (transforms 하위 또는 calib_out_cube 직접)
     json_path = os.path.join(
         args.root_folder, "calib_out_cube", "transforms",
         f"T_C{args.ref_cam_idx}_Ci_all.json"
     )
+    if not os.path.exists(json_path):
+        json_path = os.path.join(
+            args.root_folder, "calib_out_cube",
+            f"T_C{args.ref_cam_idx}_Ci_all.json"
+        )
+    if not os.path.exists(json_path):
+        json_path = os.path.join(
+            args.root_folder, "calib_out_cube", "T_C0_Ci_all.json"
+        )
+
     with open(json_path) as f:
         data = json.load(f)
 

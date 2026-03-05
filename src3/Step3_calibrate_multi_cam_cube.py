@@ -21,11 +21,11 @@ from typing import Optional, Dict, List
 import numpy as np
 import cv2
 
-from aruco_cube import CubeConfig, ArucoCubeTarget, rodrigues_to_Rt, inv_T
+from src3._aruco_cube import CubeConfig, ArucoCubeTarget, rodrigues_to_Rt, inv_T
 
 
 try:
-    from utils_pose import robust_se3_average, se3_distance
+    from src3._utils_pose import robust_se3_average, se3_distance
 except Exception:
     robust_se3_average = None
     se3_distance = None
