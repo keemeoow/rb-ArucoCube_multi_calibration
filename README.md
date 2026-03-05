@@ -1,29 +1,17 @@
 # ArucoCube Multi-Camera Calibration
 
-RealSense 다중 카메라로 ArUco 큐브를 사용해
-1) intrinsics 저장,
-2) 동기 캡처,
-3) 카메라 간 외부파라미터(상대변환) 추정,
-4) depth point cloud fusion
-를 수행하는 파이프라인입니다.
+RealSense 다중 카메라 + ArUco 큐브 기반 캘리브레이션과 객체 포즈 추정을 다룹니다.  
+루트 README는 `src2`(기준 파이프라인)와 `src3`(개선판 + 포즈 추정 확장)를 분리해 설명합니다.
 
-## 폴더 구성
+## 준비 사항
 
-- `conda env/environment.yml`: conda 환경 파일
-- `src/Step1_dump_intrinsics.py`: 카메라별 intrinsics + device_map 저장
-- `src/Step2_capture_multi_cam.py`: 멀티카메라 캡처 (`meta.json`, RGB/Depth 저장)
-- `src/Step3_calibrate_multi_cam_cube.py`: 큐브 기반 캘리브레이션 (`T_Cref_Ci`)
-- `src/Step4_fuse_depth_to_ref_pcd.py`: ref 카메라 좌표계로 depth fusion
-
-## 사전 준비
-
-- RealSense 카메라 연결 (USB bandwidth 충분히 확보)
-- `librealsense`/드라이버 설치
-- Python 환경 준비 (`pyrealsense2`, OpenCV, Open3D)
+- RealSense 카메라 연결 (USB 충분히 확보 후 realsense-viewer 에서 카메라 연결 확인)
+- `librealsense` / 드라이버 설치
+- Python 환경 준비 (`pyrealsense2`, OpenCV, NumPy, matplotlib 등)
 
 ## 환경 생성 (Conda)
 
-프로젝트 루트(`ArucoCube_multi_calibration`)에서:
+프로젝트 루트에서:
 
 ```bash
 conda env create -f "conda env/environment.yml"
@@ -31,35 +19,28 @@ conda activate multicam_cube
 ```
 
 참고:
-- 환경에 따라 `opencv` 패키지에 `cv2.aruco`가 없을 수 있습니다.
-- 그 경우 `opencv-contrib-python` 계열 설치가 필요할 수 있습니다.
+- 환경에 따라 `cv2.aruco`가 없을 수 있습니다.
+- 이 경우 `opencv-contrib-python` 계열 설치가 필요할 수 있습니다.
 
-## 표준 실행 순서 (Step1 → Step4)
+## src2: 기준 캘리브레이션 파이프라인 (Step1~4)
 
-아래 명령은 `ArucoCube_multi_calibration/src`에서 실행하는 기준입니다.
+`src2`는 멀티카메라 캘리브레이션의 기준 워크플로우입니다.
+
+- `Step1_dump_intrinsics.py`: 카메라별 intrinsics + `device_map` 저장
+- `Step2_capture_multi_cam.py`: 동기 RGB-D 캡처 (`meta.json`, RGB/Depth 저장)
+- `Step3_calibrate_multi_cam_cube.py`: 큐브 기반 외부파라미터 추정 (`T_Cref_Ci`)
+- `Step4_fuse_depth_to_ref_pcd.py`: ref 카메라 좌표계로 depth point cloud 융합
+- `diagnose_detection.py`, `visualize_*.py`: 검출/캘리브레이션 진단 및 시각화 도구
+
+### src2 실행 예시
 
 ```bash
-cd ArucoCube_multi_calibration/src
-```
+cd src2
 
-### Step1. Intrinsics / device_map 생성
-
-```bash
+# Step1
 python Step1_dump_intrinsics.py
-```
 
-생성물:
-- `intrinsics/device_map.json`
-- `intrinsics/cam0.npz`, `intrinsics/cam1.npz`, ...
-- `intrinsics/intrinsics_by_serial/serial_<SERIAL>.npz`
-- `intrinsics/depth_scales.json`
-
-권장:
-- 카메라 연결 구성이 바뀌면 Step1을 다시 실행해서 `device_map.json`을 갱신하세요.
-
-### Step2. 멀티카메라 캡처 (Step4 예정이면 depth 저장 필수)
-
-```bash
+# Step2
 python Step2_capture_multi_cam.py \
   --root_folder ./data/cube_session_01 \
   --intrinsics_dir ./intrinsics \
@@ -68,47 +49,18 @@ python Step2_capture_multi_cam.py \
   --auto_save --stable_frames 3 --cooldown_ms 700 \
   --save_depth \
   --show
-```
 
-조작:
-- `SPACE`: 수동 저장
-- `ESC` / `q`: 종료
-
-생성물:
-- `data/cube_session_01/meta.json`
-- `data/cube_session_01/camX/rgb_XXXXX.jpg`
-- `data/cube_session_01/camX/depth_XXXXX.png` (`--save_depth` 사용 시)
-
-주의:
-- `device_map.json` 기준으로 매핑 가능한 카메라가 0대면 스크립트가 종료됩니다 (안전장치).
-
-### Step3. 큐브 기반 멀티카메라 캘리브레이션
-
-예시 (ref 카메라를 `cam2`로 설정):
-
-```bash
+# Step3 (예: ref=cam0)
 python Step3_calibrate_multi_cam_cube.py \
   --root_folder ./data/cube_session_01 \
   --intrinsics_dir ./intrinsics \
-  --ref_cam_idx 2 \
+  --ref_cam_idx 0 \
   --min_markers 1 \
   --reproj_max_px 16 \
   --save_overlay \
   --overlay_max_per_cam 30
-```
 
-핵심 출력:
-- `data/cube_session_01/calib_out_cube/T_C2_C0.npy`, `T_C2_C1.npy`, ...
-- `data/cube_session_01/calib_out_cube/transforms/T_C2_Ci_all.json`
-- `data/cube_session_01/calib_out_cube/calib_results/cam0_reproj.csv`, ...
-- `data/cube_session_01/calib_out_cube/overlay/...` (`--save_overlay` 사용 시)
-
-변환 의미:
-- `T_Cref_Ci`: `cam i` 좌표계의 점을 `ref cam` 좌표계로 변환하는 4x4 변환행렬
-
-### Step4. Depth Point Cloud Fusion (ref 카메라 좌표계)
-
-```bash
+# Step4
 python Step4_fuse_depth_to_ref_pcd.py \
   --root_folder ./data/cube_session_01 \
   --intrinsics_dir ./intrinsics \
@@ -120,62 +72,68 @@ python Step4_fuse_depth_to_ref_pcd.py \
   --eval_icp
 ```
 
-생성물:
-- `data/cube_session_01/fused_ref2_frame00000.ply` (`--save_ply` 사용 시)
+## src3: src2 개선 + 객체 포즈 추정
 
-참고:
-- `device_map.json`이 없어도 `cam*.npz`, `T_Cref_Ci.npy`, depth/rgb 데이터가 있으면 실행 가능하도록 되어 있습니다.
+### src2 대비 캘리브레이션 개선 내용 (Step1~4 인프라 유지)
 
-### (옵션) SAM3D 마스크 기반 인스턴스 3D 복원 (정확한 위치 좌표 포함)
+`src3`는 `src2`의 파이프라인을 유지하면서 캘리브레이션 운용 안정성을 강화
 
-`src2/reconstruct_sam3d_multicam.py`는 Step3에서 얻은 `T_Cref_Ci`를 사용해,
-SAM/SAM3D 마스크 픽셀만 3D로 역투영하고 `ref_cam` 좌표계로 정합합니다.
+- `Step2_capture_multi_cam.py`: depth align on/off, 카메라 timeout/error 로깅, 주기적 카메라 통계 출력 옵션 추가
+- `camera.py`: 카메라 시작 재시도, 시작 실패 시 하드웨어 리셋 옵션, warmup/timeout 제어 및 스트림 health 카운터 추가
+- `aruco_cube.py`: depth 역투영 기반 3D-3D 정합(`depth_svd`) + PnP fallback 지원
+- `Step4_fuse_depth_to_ref_pcd.py`: best-frame 자동선택, ROI 기반 depth 융합, 멀티프레임 depth fusion, NumPy-only PLY 저장 보강
 
-입력 예시:
-- RGBD: `capture_dir/cam0/rgb_000123.jpg`, `depth_000123.png`
-- 마스크: `masks_dir/cam0/mask_000123.png` (라벨맵, 0=배경, 1..N=인스턴스)
-  또는 `masks_dir/cam0/chair_000123.png` 형태의 바이너리 마스크
+### 객체 포즈 추정 디렉터리 구조
 
-예시 실행:
-
-```bash
-python src2/reconstruct_sam3d_multicam.py \
-  --capture_dir ./src2/data/rgbd_capture \
-  --intrinsics_dir ./src2/intrinsics \
-  --calib_dir ./src2/data/cube_session_01/calib_out_cube \
-  --masks_dir ./src2/data/rgbd_capture_masks \
-  --ref_cam 0 \
-  --all_frames \
-  --voxel_mm 2
+```text
+src3/
+├── pose_step5_localize/              ← GroundingDINO+SAM2 3D 위치추정
+│   ├── Step5_localize_object_3d.py
+│   └── output/ (7개 파일)
+├── pose_step6_ply/                   ← PLY 기반 ICP 포즈 추정
+│   ├── Step6_estimate_pose_from_ply.py
+│   ├── visualize_pose.py
+│   └── output/ (11개 파일)
+├── pose_step7_direct/                ← RGB-D 직접 포즈 추정
+│   ├── Step7_direct_pose_from_rgbd.py
+│   └── output/ (5개 파일)
+├── pose_estimate_grounding_sam/      ← GroundingDINO+SAM2 6DoF 풀 포즈
+│   ├── estimate_object_pose.py
+│   └── output/ (6개 파일)
+│
+├── convert_pose_to_isaac.py          ← 공통 유틸 (유지)
+├── Step1~4*.py                       ← 캘리브레이션 인프라
+├── data/                             ← 입력 데이터만
+├── intrinsics/
+└── checkpoints/
 ```
 
-출력:
-- `sam3d/instance_<id>_*.ply` (인스턴스별 3D 포인트클라우드)
-- `sam3d/instance_positions.json` (centroid, bbox 등 미터 단위 위치값)
+### 포즈 추정 코드 설명
 
-## 빠른 점검 체크리스트
+- `pose_step5_localize/Step5_localize_object_3d.py`
+  - GroundingDINO + SAM2로 객체 검출/분할 후, 마스크 depth를 역투영해 객체 3D 위치를 추정합니다.
+  - 멀티카메라 좌표를 ref 카메라로 정합해 프레임별 위치를 `localization_results.json`으로 저장합니다.
 
-- Step1 후 `intrinsics/cam*.npz` 파일이 카메라 수만큼 생성되었는지
-- Step2 후 `meta.json`의 `captures`가 증가하는지
-- Step2에서 Step4를 할 예정이면 `depth_*.png`가 저장되는지 (`--save_depth`)
-- Step3 후 `calib_out_cube/T_C{ref}_C{i}.npy`가 생성되는지
-- Step3 `calib_results/cam*_reproj.csv`에서 `err_mean` 값이 과도하게 크지 않은지
-- Step4에서 ICP 평가(`--eval_icp`)의 `rmse`/`fitness`가 일관적인지
+- `pose_step6_ply/Step6_estimate_pose_from_ply.py`
+  - `SAM3D/COLMAP/GS2Mesh` 계열 PLY를 ICP 기반으로 cam0 좌표계에 정합합니다.
+  - `T_cam0_colmap.npy`를 추정/재사용하며, 정합된 PLY와 `pose_estimation_results.json`을 출력합니다.
 
-## 자주 발생하는 문제
+- `pose_step7_direct/Step7_direct_pose_from_rgbd.py` 
+  - ML 모델 없이 RGB-D만으로 직접 포즈를 구합니다.
+  - 멀티카메라 depth 융합 -> 평면 제거 -> 클러스터링 -> PCA 주축 추정으로 위치/회전을 계산합니다.
 
-- `No RealSense devices found`
-  - 케이블/전원/USB 포트 확인
-  - 다른 프로세스가 카메라 점유 중인지 확인
+- `pose_estimate_grounding_sam/estimate_object_pose.py` (최종 포즈 추정 모델로 체택)
+  - GroundingDINO + SAM2 기반으로 6DoF 포즈를 추정하고 Isaac Lab 좌표계로 변환합니다.
+  - 결과를 cam0/OpenCV 좌표계와 Isaac(USD) 좌표계 모두 JSON으로 저장합니다.
 
-- `device_map.json` 관련 경고/종료
-  - Step1 재실행 후 Step2 재시도
-  - 카메라 serial 변경/누락 여부 확인
+### src3 변경 사항
 
-- `cv2.aruco` 없음
-  - OpenCV 설치 구성 확인 (contrib 포함 여부)
+- 4개 포즈 추정 방법별로 스크립트와 결과를 각각 하나의 폴더로 정리
+- 각 스크립트 기본 경로를 `../` 기준으로 통일 (`intrinsics`, `checkpoints`, `out_dir`)
+- `pose_step6_ply/visualize_pose.py` 하드코딩 경로를 `os.path` 기반 상대경로로 변경
+- 포즈 추정 스크립트 Python 문법 검증 완료
 
-- Step3에서 유효 프레임 부족
-  - `--min_markers` 낮추기
-  - `--reproj_max_px` 완화
-  - 큐브 가시성/조명/초점 개선
+### src3 실행 방법
+
+- 각 포즈 추정 폴더로 이동해서 상단에 실행 명령어 복붙하여 사용
+- 입력 데이터는 `../data/...` 경로를 참조

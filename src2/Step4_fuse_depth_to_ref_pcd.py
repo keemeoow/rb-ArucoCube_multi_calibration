@@ -1,46 +1,6 @@
 # Step4_fuse_depth_to_ref_pcd.py
 # 전체 프레임 기반 검증/통합 + 단일 프레임 시각화
-"""
-[결과만 잘나오게]
-python Step4_fuse_depth_to_ref_pcd.py \
-  --root_folder ./data/cube_session_01 \
-  --intrinsics_dir ./intrinsics \
-  --ref_cam_idx 0 \
-  --frame_idx 0 \
-  --auto_best_frame \
-  --use_depth \
-  --save_overlay \
-  --depth_pose_mode frame \
-  --depth_cube_roi_margin_m 0.05 \
-  --depth_z_min 0.2 \
-  --depth_z_max 1.5 \
-  --depth_auto_z_window_m 0.10 \
-  --depth_stride 2
-"""
-"""
-[roi 없이]
-python Step4_fuse_depth_to_ref_pcd.py \
-  --root_folder ./data/cube_session_01 \
-  --intrinsics_dir ./intrinsics \
-  --ref_cam_idx 0 \
-  --frame_idx 0 \
-  --auto_best_frame \
-  --use_depth \
-  --save_overlay \
-  --depth_pose_mode frame \
-  --depth_dense_no_roi \
-  --depth_vis_max_points 120000
-"""
-"""
-python Step4_fuse_depth_to_ref_pcd.py \
-  --root_folder ./data/cube_session_01 \
-  --intrinsics_dir ./intrinsics \
-  --ref_cam_idx 0 \
-  --frame_idx 0 \
-  --use_depth \
-  --save_overlay \
-  --depth_cube_roi_margin_m 0.06
-"""
+
 """
 python Step4_fuse_depth_to_ref_pcd.py \
   --root_folder ./data/cube_session_01 \
@@ -52,23 +12,6 @@ python Step4_fuse_depth_to_ref_pcd.py \
 설명:
 - 계산: 전체 프레임 사용 (PnP / cross-camera reprojection / 전역 큐브 pose 추정)
 - 시각화: --frame_idx 한 프레임만 사용 (기본 0)
-"""
-"""
-[전체 프레임 depth fusion (멀티프레임)]
-python Step4_fuse_depth_to_ref_pcd.py \
-  --root_folder ./data/cube_session_01 \
-  --intrinsics_dir ./intrinsics \
-  --ref_cam_idx 0 \
-  --frame_idx 0 \
-  --auto_best_frame \
-  --use_depth \
-  --depth_all_frames \
-  --save_overlay \
-  --depth_pose_mode frame \
-  --depth_stride 2 \
-  --depth_voxel_size_m 0.002 \
-  --depth_z_min 0.2 \
-  --depth_z_max 1.5
 """
 
 import os
@@ -83,7 +26,7 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
-# open3d 는 선택적 의존성; 없어도 PLY 저장 + matplotlib로 대체
+# import open3d as o3d  # depth fusion 시에만 필요
 
 from aruco_cube import CubeConfig, ArucoCubeModel, ArucoCubeTarget, rodrigues_to_Rt
 
@@ -333,59 +276,6 @@ def summarize_cube_consistency(obs_by_frame: Dict[int, List[dict]], T_global: np
         f"trans mean={np.mean(global_trans_mm):.2f}mm max={np.max(global_trans_mm):.2f}mm, "
         f"rot mean={np.mean(global_rot_deg):.2f}deg max={np.max(global_rot_deg):.2f}deg"
     )
-
-
-def estimate_frame_cube_pose(obs_by_frame: Dict[int, List[dict]], frame_id: int) -> Optional[np.ndarray]:
-    obs = obs_by_frame.get(int(frame_id), [])
-    if len(obs) == 0:
-        return None
-    Ts = [o["T_Cref_O"] for o in obs]
-    ws = [o["weight"] for o in obs]
-    if robust_se3_average is not None and len(Ts) >= 3:
-        return robust_se3_average(Ts)
-    return se3_avg_weighted(Ts, ws)
-
-
-def select_best_frame_for_depth(
-    pnp_by_frame: Dict[int, Dict[int, dict]],
-    ref_cam_idx: int,
-) -> Optional[int]:
-    """
-    단일 depth fusion용으로 '잘 맞는' 프레임을 고른다.
-    우선순위:
-    - ref cam 포함
-    - PnP 성공 카메라 수 많음
-    - 사용 마커 수(합) 많음
-    - 평균 reproj 오차 작음
-    - ref cam reproj 오차 작음
-    """
-    best_fid = None
-    best_key = None
-
-    for fid, frame_res in sorted(pnp_by_frame.items()):
-        if len(frame_res) == 0:
-            continue
-        has_ref = 1 if ref_cam_idx in frame_res else 0
-        n_cams = len(frame_res)
-        total_markers = int(sum(len(r.get("used", [])) for r in frame_res.values()))
-        errs = [float(r["reproj"]["err_mean"]) for r in frame_res.values() if "reproj" in r]
-        mean_err = float(np.mean(errs)) if errs else float("inf")
-        ref_err = float(frame_res[ref_cam_idx]["reproj"]["err_mean"]) if has_ref else float("inf")
-
-        # max metrics are positive, min-error metrics are negated
-        key = (
-            has_ref,
-            n_cams,
-            total_markers,
-            -mean_err,
-            -ref_err,
-            -int(fid),  # tie-break: earlier frame preferred
-        )
-        if best_key is None or key > best_key:
-            best_key = key
-            best_fid = int(fid)
-
-    return best_fid
 
 
 def evaluate_cross_reproj_all_frames(
@@ -665,26 +555,6 @@ def validate_cross_reproj_single_frame(
 # ------------------------------------------------------------------ #
 # depth 관련 함수 (--use_depth 플래그 사용 시에만 호출)
 # ------------------------------------------------------------------ #
-def _save_ply(path: str, points: np.ndarray, colors: np.ndarray) -> None:
-    """Colored point cloud을 ASCII PLY 파일로 저장 (open3d 불필요)."""
-    n = len(points)
-    with open(path, "w") as f:
-        f.write("ply\nformat ascii 1.0\n")
-        f.write(f"element vertex {n}\n")
-        f.write("property float x\nproperty float y\nproperty float z\n")
-        f.write("property uchar red\nproperty uchar green\nproperty uchar blue\n")
-        f.write("end_header\n")
-        rgb_u8 = np.clip(colors * 255.0, 0, 255).astype(np.uint8)
-        lines = [
-            f"{points[i, 0]:.6f} {points[i, 1]:.6f} {points[i, 2]:.6f} "
-            f"{rgb_u8[i, 0]} {rgb_u8[i, 1]} {rgb_u8[i, 2]}"
-            for i in range(n)
-        ]
-        f.write("\n".join(lines))
-        if n > 0:
-            f.write("\n")
-
-
 def depth_to_points_cam(depth_u16, K, depth_scale, z_min, z_max, stride=4):
     fx, fy = K[0, 0], K[1, 1]
     cx, cy = K[0, 2], K[1, 2]
@@ -713,106 +583,6 @@ def transform_points_rowvec(points, T_ref_cam):
     return points @ R.T + t.reshape(1, 3)
 
 
-def cube_roi_mask_in_ref(points_ref: np.ndarray, T_ref_cube: np.ndarray, half_extents_xyz: np.ndarray) -> np.ndarray:
-    """
-    ref 좌표계 점들을 큐브 좌표계(local)로 변환한 뒤 oriented box ROI 마스크를 만든다.
-    T_ref_cube: cube/object -> ref transform
-    """
-    if points_ref.size == 0:
-        return np.zeros((0,), dtype=bool)
-    R = T_ref_cube[:3, :3]
-    t = T_ref_cube[:3, 3]
-    pts_local = (points_ref - t.reshape(1, 3)) @ R
-    he = np.asarray(half_extents_xyz, dtype=np.float64).reshape(1, 3)
-    return np.all(np.abs(pts_local) <= he, axis=1)
-
-
-def voxel_downsample(points: np.ndarray, colors: np.ndarray, voxel_size: float) -> Tuple[np.ndarray, np.ndarray]:
-    """Numpy-only voxel grid downsampling. 같은 voxel 내 점들의 위치/색상 평균."""
-    if points.shape[0] == 0 or voxel_size <= 0:
-        return points, colors
-    voxel_indices = np.floor(points / voxel_size).astype(np.int64)
-    mins = voxel_indices.min(axis=0)
-    shifted = voxel_indices - mins
-    dims = shifted.max(axis=0) + 1
-    keys = shifted[:, 0] * (dims[1] * dims[2]) + shifted[:, 1] * dims[2] + shifted[:, 2]
-    unique_keys, inverse, counts = np.unique(keys, return_inverse=True, return_counts=True)
-    n_voxels = len(unique_keys)
-    sum_pts = np.zeros((n_voxels, 3), dtype=np.float64)
-    sum_cols = np.zeros((n_voxels, 3), dtype=np.float64)
-    np.add.at(sum_pts, inverse, points)
-    np.add.at(sum_cols, inverse, colors)
-    return sum_pts / counts[:, None], sum_cols / counts[:, None]
-
-
-def _fuse_depth_single_frame(
-    root_folder: str,
-    frame_idx: int,
-    cam_indices: List[int],
-    T_ref: Dict[int, np.ndarray],
-    K_map: Dict[int, np.ndarray],
-    intrinsics_dir: str,
-    z_min: float,
-    z_max: float,
-    stride: int,
-    depth_cube_roi: bool,
-    roi_half: Optional[np.ndarray],
-    T_cube_depth: np.ndarray,
-    verbose: bool = True,
-) -> Tuple[List[np.ndarray], List[np.ndarray]]:
-    """단일 프레임의 모든 카메라 depth를 ref 좌표계로 변환하여 반환."""
-    frame_pts: List[np.ndarray] = []
-    frame_cols: List[np.ndarray] = []
-    for ci in cam_indices:
-        if ci not in T_ref:
-            continue
-        rgb_path = os.path.join(root_folder, f"cam{ci}", f"rgb_{frame_idx:05d}.jpg")
-        depth_path = os.path.join(root_folder, f"cam{ci}", f"depth_{frame_idx:05d}.png")
-        if not (os.path.exists(rgb_path) and os.path.exists(depth_path)):
-            if verbose:
-                print(f"[WARN] depth 없음: cam{ci} frame {frame_idx} (skip)")
-            continue
-
-        rgb_bgr = cv2.imread(rgb_path, cv2.IMREAD_COLOR)
-        depth_u16 = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED)
-        if rgb_bgr is None or depth_u16 is None:
-            if verbose:
-                print(f"[WARN] 이미지 로드 실패: cam{ci} frame {frame_idx} (skip)")
-            continue
-
-        rgb = cv2.cvtColor(rgb_bgr, cv2.COLOR_BGR2RGB).astype(np.float64) / 255.0
-        _, _, ds = load_intrinsics_cam_npz(intrinsics_dir, ci)
-        if ds is None or np.isnan(ds):
-            ds = 0.001
-
-        pts_cam, pix = depth_to_points_cam(depth_u16, K_map[ci], ds, z_min, z_max, stride)
-        if pts_cam.shape[0] == 0:
-            continue
-
-        raw_n = int(pts_cam.shape[0])
-        pix_arr = np.asarray(pix, dtype=np.int32)
-        pts_ref = transform_points_rowvec(pts_cam, T_ref[ci])
-
-        if depth_cube_roi and roi_half is not None:
-            mask = cube_roi_mask_in_ref(pts_ref, T_cube_depth, roi_half)
-            kept = int(np.count_nonzero(mask))
-            if kept == 0:
-                continue
-            pts_ref = pts_ref[mask]
-            pix_arr = pix_arr[mask]
-            if verbose:
-                print(f"[INFO] cam{ci}: raw={raw_n}  roi={kept} points fused")
-        else:
-            if verbose:
-                print(f"[INFO] cam{ci}: {raw_n} points fused")
-
-        cols = rgb[pix_arr[:, 0], pix_arr[:, 1]].astype(np.float64)
-        frame_pts.append(pts_ref)
-        frame_cols.append(cols)
-
-    return frame_pts, frame_cols
-
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--root_folder", type=str, required=True)
@@ -831,48 +601,7 @@ def main():
 
     parser.add_argument("--use_depth", action="store_true",
                         help="depth 이미지가 있을 때 frame_idx 한 프레임 fusion 수행")
-    parser.add_argument("--auto_best_frame", action="store_true",
-                        help="depth/시각화용 frame_idx를 PnP 품질 기준으로 자동 선택")
-    parser.add_argument("--depth_dense_no_roi", action="store_true",
-                        help="결과를 빽빽하게 보기 위한 프리셋: ROI OFF + stride=1 + auto-z-window OFF + vis points 증가")
-    parser.add_argument("--depth_pose_mode", type=str, default="frame", choices=["global", "frame"],
-                        help="depth ROI/시각화에 사용할 큐브 pose 기준 (default: frame)")
-    parser.add_argument("--depth_stride", type=int, default=4,
-                        help="depth subsampling stride (default: 4)")
-    parser.add_argument("--depth_z_min", type=float, default=0.2,
-                        help="depth min range in meters")
-    parser.add_argument("--depth_z_max", type=float, default=1.5,
-                        help="depth max range in meters")
-    parser.add_argument("--depth_auto_z_window_m", type=float, default=0.12,
-                        help="선택된 큐브 중심 z 기준 +/- window로 depth z-range를 추가로 좁힘 (0=비활성)")
-    parser.add_argument("--depth_cube_roi", dest="depth_cube_roi", action="store_true",
-                        help="전역 큐브 pose 기준 ROI 박스로 depth를 crop (default: on)")
-    parser.add_argument("--no_depth_cube_roi", dest="depth_cube_roi", action="store_false",
-                        help="큐브 ROI crop 비활성화 (기존 동작)")
-    parser.add_argument("--depth_cube_roi_margin_m", type=float, default=0.06,
-                        help="큐브 반경계에 추가할 ROI margin (m), default=0.06")
-    parser.add_argument("--depth_vis_max_points", type=int, default=8000,
-                        help="depth PNG 시각화 시 표시할 최대 점 수 (PLY 저장 점 수와는 별개)")
-    parser.add_argument("--depth_all_frames", action="store_true",
-                        help="모든 프레임 depth fusion (--use_depth와 함께 사용)")
-    parser.add_argument("--depth_voxel_size_m", type=float, default=0.0,
-                        help="voxel downsampling grid size in meters (0=disable, 권장: 0.001~0.003)")
-    parser.add_argument("--depth_frame_skip", type=int, default=1,
-                        help="multi-frame 시 N번째 프레임마다 사용 (메모리 절약, default: 1=all)")
-    parser.set_defaults(depth_cube_roi=True)
     args = parser.parse_args()
-
-    if args.depth_dense_no_roi:
-        args.depth_cube_roi = False
-        args.depth_stride = 1
-        args.depth_auto_z_window_m = 0.0
-        if args.depth_vis_max_points == 8000:
-            args.depth_vis_max_points = 50000
-        print(
-            "[INFO] depth_dense_no_roi preset applied: "
-            "depth_cube_roi=OFF, depth_stride=1, depth_auto_z_window_m=0, "
-            f"depth_vis_max_points={args.depth_vis_max_points}"
-        )
 
     try:
         _, map_path = load_device_map(args.intrinsics_dir)
@@ -933,15 +662,6 @@ def main():
         cam_indices, pnp_by_frame, T_ref, K_map, D_map, args.ref_cam_idx
     )
 
-    if args.auto_best_frame:
-        best_fid = select_best_frame_for_depth(pnp_by_frame, args.ref_cam_idx)
-        if best_fid is None:
-            print("[WARN] auto_best_frame: suitable frame not found, keeping --frame_idx")
-        else:
-            old_fid = int(args.frame_idx)
-            args.frame_idx = int(best_fid)
-            print(f"[INFO] auto_best_frame: frame_idx {old_fid} -> {args.frame_idx}")
-
     print(f"\n[STEP4-3] 시각화 프레임: {args.frame_idx}")
     pnp_viz = pnp_by_frame.get(args.frame_idx, {})
     if len(pnp_viz) == 0:
@@ -977,179 +697,43 @@ def main():
     )
 
     if args.use_depth:
-        # ── 공통: z-range, stride, ROI 설정 ─────────────────────────
-        # z-range auto-centering 용 pose (multi-frame은 global 사용)
-        T_cube_for_z = T_cube_global
-        if not args.depth_all_frames and args.depth_pose_mode == "frame":
-            T_frame = estimate_frame_cube_pose(obs_by_frame, args.frame_idx)
-            if T_frame is not None:
-                T_cube_for_z = T_frame
-                cdf = T_cube_for_z[:3, 3]
-                print(
-                    f"[INFO] Depth pose mode: frame  (cube center z={cdf[2]:.4f}m for frame {args.frame_idx})"
-                )
-            else:
-                print("[WARN] Depth pose mode=frame but frame pose unavailable, fallback to global")
-                cdf = T_cube_for_z[:3, 3]
-                print(f"[INFO] Depth pose mode: global (cube center z={cdf[2]:.4f}m)")
-        else:
-            cdf = T_cube_for_z[:3, 3]
-            print(f"[INFO] Depth pose mode: {'global (all-frames)' if args.depth_all_frames else 'global'} "
-                  f"(cube center z={cdf[2]:.4f}m)")
-
-        stride = max(1, int(args.depth_stride))
-        z_min = float(args.depth_z_min)
-        z_max = float(args.depth_z_max)
-        if args.depth_auto_z_window_m > 0:
-            zc = float(T_cube_for_z[2, 3])
-            w = float(args.depth_auto_z_window_m)
-            z_min_auto = zc - w
-            z_max_auto = zc + w
-            z_min = max(z_min, z_min_auto)
-            z_max = min(z_max, z_max_auto)
-            print(
-                f"[INFO] Depth z-range: base=({args.depth_z_min:.3f}, {args.depth_z_max:.3f}) "
-                f"auto_centered=({z_min_auto:.3f}, {z_max_auto:.3f}) -> effective=({z_min:.3f}, {z_max:.3f})"
-            )
-        else:
-            print(f"[INFO] Depth z-range: effective=({z_min:.3f}, {z_max:.3f})")
-        if z_max <= z_min:
-            raise RuntimeError(
-                f"Invalid depth z-range after auto-centering: z_min={z_min:.3f}, z_max={z_max:.3f}. "
-                "Adjust --depth_auto_z_window_m or base z range."
-            )
-
-        roi_half = None
-        if args.depth_cube_roi:
-            roi_half_scalar = (float(cfg.cube_side_m) * 0.5) + float(args.depth_cube_roi_margin_m)
-            roi_half = np.array([roi_half_scalar, roi_half_scalar, roi_half_scalar], dtype=np.float64)
-            print(
-                f"[INFO] Depth ROI(cube OBB): ON  half_extents="
-                f"({roi_half[0]:.3f}, {roi_half[1]:.3f}, {roi_half[2]:.3f})m"
-            )
-        else:
-            print("[INFO] Depth ROI(cube OBB): OFF")
-
-        # ── 분기: 멀티프레임 vs 단일프레임 ───────────────────────────
+        import open3d as o3d
+        stride, z_min, z_max = 4, 0.2, 1.5
         all_pts, all_cols = [], []
 
-        if args.depth_all_frames:
-            # === MULTI-FRAME FUSION ===
-            fusion_frame_ids = sorted(pnp_by_frame.keys())
-            if args.depth_frame_skip > 1:
-                fusion_frame_ids = fusion_frame_ids[::args.depth_frame_skip]
-            print(
-                f"\n[DEPTH-MULTIFRAME] Fusing {len(fusion_frame_ids)} frames "
-                f"x {len(cam_indices)} cams (skip={args.depth_frame_skip})"
-            )
-            frames_used = 0
-            for fid in fusion_frame_ids:
-                if args.depth_pose_mode == "frame":
-                    T_cube_frame = estimate_frame_cube_pose(obs_by_frame, fid)
-                    if T_cube_frame is None:
-                        T_cube_frame = T_cube_global
-                else:
-                    T_cube_frame = T_cube_global
+        for ci in cam_indices:
+            if ci not in T_ref:
+                continue
+            rgb_path = os.path.join(args.root_folder, f"cam{ci}", f"rgb_{args.frame_idx:05d}.jpg")
+            depth_path = os.path.join(args.root_folder, f"cam{ci}", f"depth_{args.frame_idx:05d}.png")
+            if not (os.path.exists(rgb_path) and os.path.exists(depth_path)):
+                print(f"[WARN] depth 없음: cam{ci} frame {args.frame_idx} (skip)")
+                continue
 
-                f_pts, f_cols = _fuse_depth_single_frame(
-                    root_folder=args.root_folder,
-                    frame_idx=fid,
-                    cam_indices=cam_indices,
-                    T_ref=T_ref,
-                    K_map=K_map,
-                    intrinsics_dir=args.intrinsics_dir,
-                    z_min=z_min, z_max=z_max, stride=stride,
-                    depth_cube_roi=args.depth_cube_roi,
-                    roi_half=roi_half,
-                    T_cube_depth=T_cube_frame,
-                    verbose=False,
-                )
-                if f_pts:
-                    n_frame = sum(p.shape[0] for p in f_pts)
-                    all_pts.extend(f_pts)
-                    all_cols.extend(f_cols)
-                    frames_used += 1
-                    print(
-                        f"[DEPTH-MULTIFRAME] frame {fid:5d}: {n_frame:>8d} points "
-                        f"({len(f_pts)} cams)"
-                    )
-            print(f"[DEPTH-MULTIFRAME] Frames used: {frames_used}/{len(fusion_frame_ids)}")
-            T_cube_viz = T_cube_global
-            ply_name = "depth_fusion_allframes.ply"
-            fig_name = "depth_fusion_allframes.png"
-            title_extra = f"all frames ({frames_used} frames)"
-        else:
-            # === SINGLE-FRAME FUSION (기존 동작) ===
-            T_cube_depth = T_cube_for_z
-            all_pts, all_cols = _fuse_depth_single_frame(
-                root_folder=args.root_folder,
-                frame_idx=args.frame_idx,
-                cam_indices=cam_indices,
-                T_ref=T_ref,
-                K_map=K_map,
-                intrinsics_dir=args.intrinsics_dir,
-                z_min=z_min, z_max=z_max, stride=stride,
-                depth_cube_roi=args.depth_cube_roi,
-                roi_half=roi_half,
-                T_cube_depth=T_cube_depth,
-            )
-            T_cube_viz = T_cube_depth
-            ply_name = f"depth_fusion_frame{args.frame_idx:05d}.ply"
-            fig_name = f"depth_fusion_frame{args.frame_idx:05d}.png"
-            title_extra = f"frame {args.frame_idx}"
+            rgb_bgr = cv2.imread(rgb_path, cv2.IMREAD_COLOR)
+            depth_u16 = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED)
+            rgb = cv2.cvtColor(rgb_bgr, cv2.COLOR_BGR2RGB).astype(np.float64) / 255.0
+            _, _, ds = load_intrinsics_cam_npz(args.intrinsics_dir, ci)
+            if ds is None or np.isnan(ds):
+                ds = 0.001
 
-        # ── 공통 후처리: voxel downsample → PLY 저장 → 시각화 ────────
+            pts_cam, pix = depth_to_points_cam(depth_u16, K_map[ci], ds, z_min, z_max, stride)
+            if pts_cam.shape[0] == 0:
+                continue
+            pts_ref = transform_points_rowvec(pts_cam, T_ref[ci])
+            cols = np.array([rgb[v, u] for (v, u) in pix], dtype=np.float64)
+            all_pts.append(pts_ref)
+            all_cols.append(cols)
+            print(f"[INFO] cam{ci}: {pts_ref.shape[0]} points")
+
         if all_pts:
             P = np.concatenate(all_pts, axis=0)
             C = np.concatenate(all_cols, axis=0)
-            print(f"[INFO] 전체 fused points: {len(P)}")
-
-            if args.depth_voxel_size_m > 0:
-                n_before = len(P)
-                P, C = voxel_downsample(P, C, args.depth_voxel_size_m)
-                print(
-                    f"[INFO] Voxel downsample ({args.depth_voxel_size_m*1000:.1f}mm): "
-                    f"{n_before} -> {len(P)} points ({100*len(P)/max(n_before,1):.1f}%)"
-                )
-
-            ply_path = os.path.join(args.root_folder, ply_name)
-            _save_ply(ply_path, P, C)
-            print(f"[SAVE] {ply_path}")
-
-            fig = plt.figure(figsize=(11, 8))
-            ax = fig.add_subplot(111, projection="3d")
-            max_vis_points = max(1, int(args.depth_vis_max_points))
-            vis_stride = max(1, len(P) // max_vis_points)
-            ax.scatter(
-                P[::vis_stride, 0], P[::vis_stride, 1], P[::vis_stride, 2],
-                c=C[::vis_stride], s=1, alpha=0.6, linewidths=0,
-            )
-            draw_cube_at_T(ax, T_cube_viz, cfg, alpha=0.25)
-
-            for i, ci in enumerate(sorted(T_ref.keys())):
-                cam_pos = np.zeros(3) if ci == args.ref_cam_idx else T_ref[ci][:3, 3]
-                ax.scatter(*cam_pos, c=CAM_COLORS_MPL[i % len(CAM_COLORS_MPL)],
-                           s=120, marker="^", edgecolors="k", zorder=8)
-                ax.text(*cam_pos, f" cam{ci}", fontsize=8,
-                        color=CAM_COLORS_MPL[i % len(CAM_COLORS_MPL)])
-
-            ax.set_xlabel("X (m)")
-            ax.set_ylabel("Y (m)")
-            ax.set_zlabel("Z (m)")
-            ax.set_title(
-                f"Depth Fusion – ref cam{args.ref_cam_idx}, {title_extra}\n"
-                f"{len(P)} points total  (PLY: {os.path.basename(ply_path)})",
-                fontsize=9,
-            )
-            ax.set_box_aspect([1, 1, 1])
-            plt.tight_layout()
-            if args.save_overlay:
-                fig_path = os.path.join(args.root_folder, fig_name)
-                plt.savefig(fig_path, dpi=150, bbox_inches="tight")
-                print(f"[SAVE] {fig_path}")
-            plt.show()
-        else:
-            print("[WARN] depth fusion: 유효 점 없음 (depth 이미지 확인 또는 --save_depth 재캡처 필요)")
+            fused = o3d.geometry.PointCloud()
+            fused.points = o3d.utility.Vector3dVector(P)
+            fused.colors = o3d.utility.Vector3dVector(C)
+            axis = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1)
+            o3d.visualization.draw_geometries([axis, fused])
 
     print("[INFO] Step4 finished.")
 
