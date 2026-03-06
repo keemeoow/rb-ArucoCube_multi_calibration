@@ -741,7 +741,6 @@ def visualize_pose_cam0(pose, out_path, title):
     fig.savefig(out_path, dpi=200, bbox_inches="tight")
     plt.close(fig)
 
-
 # ──────────────────────────────────────────────────────────────────
 #  8. 결과 저장
 # ──────────────────────────────────────────────────────────────────
@@ -751,10 +750,15 @@ def save_results(pose, obs_pts, obs_rgb, ref_pts_transformed,
 
     os.makedirs(out_dir, exist_ok=True)
 
-    R = pose["R"]
-    pos_mm = np.array(pose["position_mm"])
-    eu = pose["euler_xyz_deg"]
-    q = pose["quaternion_wxyz"]
+    # --- robust normalize (list/np/None 모두 처리) ---
+    R = np.asarray(pose.get("R"), dtype=float) if pose.get("R") is not None else None
+    pos_mm = np.asarray(pose.get("position_mm", [0, 0, 0]), dtype=float).reshape(-1)
+
+    eu_raw = pose.get("euler_xyz_deg", None)
+    q_raw  = pose.get("quaternion_wxyz", None)
+
+    eu_list = None if eu_raw is None else np.asarray(eu_raw, dtype=float).reshape(-1).tolist()
+    q_list  = None if q_raw  is None else np.asarray(q_raw,  dtype=float).reshape(-1).tolist()
 
     # 콘솔 출력
     print(f"\n{'='*56}")
@@ -762,8 +766,17 @@ def save_results(pose, obs_pts, obs_rgb, ref_pts_transformed,
     print(f"  method: GLB reference + ICP")
     print(f"{'='*56}")
     print(f"  Position   (mm): ({pos_mm[0]:+.1f}, {pos_mm[1]:+.1f}, {pos_mm[2]:+.1f})")
-    print(f"  Euler XYZ (deg): ({eu[0]:+.1f}, {eu[1]:+.1f}, {eu[2]:+.1f})")
-    print(f"  Quat wxyz      : ({q[0]:.5f}, {q[1]:.5f}, {q[2]:.5f}, {q[3]:.5f})")
+
+    if eu_list is not None and len(eu_list) >= 3:
+        print(f"  Euler XYZ (deg): ({eu_list[0]:+.1f}, {eu_list[1]:+.1f}, {eu_list[2]:+.1f})")
+    else:
+        print(f"  Euler XYZ (deg): N/A")
+
+    if q_list is not None and len(q_list) >= 4:
+        print(f"  Quat wxyz      : ({q_list[0]:.5f}, {q_list[1]:.5f}, {q_list[2]:.5f}, {q_list[3]:.5f})")
+    else:
+        print(f"  Quat wxyz      : N/A")
+
     print(f"  ICP fitness    : {pose['icp_fitness']:.4f}")
     print(f"  ICP RMSE  (mm) : {pose['icp_rmse_mm']:.3f}")
     print(f"  Scale factor   : {pose['scale_factor']:.6f}")
@@ -776,14 +789,15 @@ def save_results(pose, obs_pts, obs_rgb, ref_pts_transformed,
         "method": "GLB_reference_ICP",
         "reference_model": pose["ref_model_path"],
         "position_mm": pos_mm.tolist(),
-        "euler_xyz_deg": eu.tolist(),
-        "quaternion_wxyz": q.tolist(),
-        "rotation_matrix": R.tolist(),
-        "icp_fitness": pose["icp_fitness"],
-        "icp_rmse_mm": pose["icp_rmse_mm"],
-        "scale_factor": pose["scale_factor"],
-        "elapsed_sec": round(elapsed, 2),
+        "euler_xyz_deg": eu_list,
+        "quaternion_wxyz": q_list,
+        "rotation_matrix": (None if R is None else R.tolist()),
+        "icp_fitness": float(pose["icp_fitness"]),
+        "icp_rmse_mm": float(pose["icp_rmse_mm"]),
+        "scale_factor": float(pose["scale_factor"]),
+        "elapsed_sec": round(float(elapsed), 2),
     }
+
     json_path = os.path.join(out_dir, f"pose_{tag}.json")
     with open(json_path, "w") as f:
         json.dump(result, f, indent=2, ensure_ascii=False)
@@ -792,16 +806,16 @@ def save_results(pose, obs_pts, obs_rgb, ref_pts_transformed,
     # 관측 점군 PLY
     obs_ply_path = os.path.join(out_dir, f"observed_pointcloud_{tag}.ply")
     obs_pcd = o3d.geometry.PointCloud()
-    obs_pcd.points = o3d.utility.Vector3dVector(obs_pts)
+    obs_pcd.points = o3d.utility.Vector3dVector(np.asarray(obs_pts))
     if obs_rgb is not None:
-        obs_pcd.colors = o3d.utility.Vector3dVector(np.clip(obs_rgb, 0, 1))
+        obs_pcd.colors = o3d.utility.Vector3dVector(np.clip(np.asarray(obs_rgb), 0, 1))
     o3d.io.write_point_cloud(obs_ply_path, obs_pcd)
     print(f"  [저장] {obs_ply_path}")
 
     # ICP 정합 결과 PLY (참조 모델 변환 후)
     ref_ply_path = os.path.join(out_dir, f"aligned_reference_{tag}.ply")
     ref_pcd = o3d.geometry.PointCloud()
-    ref_pcd.points = o3d.utility.Vector3dVector(ref_pts_transformed)
+    ref_pcd.points = o3d.utility.Vector3dVector(np.asarray(ref_pts_transformed))
     o3d.io.write_point_cloud(ref_ply_path, ref_pcd)
     print(f"  [저장] {ref_ply_path}")
 
@@ -952,8 +966,8 @@ def main():
     pose = {
         "R": R,
         "position_mm": t * 1000,
-        "euler_xyz_deg": eu.tolist(),
-        "quaternion_wxyz": q.tolist(),
+        "euler_xyz_deg": (None if eu is None else np.asarray(eu, dtype=float).tolist()),
+        "quaternion_wxyz": (None if q is None else np.asarray(q, dtype=float).tolist()),
         "icp_fitness": float(fitness),
         "icp_rmse_mm": float(rmse * 1000),
         "scale_factor": float(scale),
