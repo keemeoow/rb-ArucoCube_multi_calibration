@@ -107,25 +107,42 @@ def load_reference_model(path: str) -> "open3d.geometry.PointCloud":
     return pcd
 
 
-def scale_reference_to_observation(ref_pcd, obs_pcd) -> Tuple["open3d.geometry.PointCloud", float]:
-    """참조 모델을 관측 점군 크기에 맞게 스케일링."""
+def scale_reference_to_observation(ref_pcd, obs_pcd,
+                                    ref_length_mm: float = None,
+                                    manual_scale: float = None
+                                    ) -> Tuple["open3d.geometry.PointCloud", float]:
+    """참조 모델을 실제 크기에 맞게 스케일링.
+
+    우선순위:
+      1. manual_scale: 직접 지정한 스케일 값
+      2. ref_length_mm: 실제 물체 길이(mm)로 역산
+      3. 자동(bbox 비교): 관측 점군의 가장 긴 축 기준
+    """
     import open3d as o3d
 
     ref_pts = np.asarray(ref_pcd.points)
-    obs_pts = np.asarray(obs_pcd.points)
-
-    # 각각의 OBB 크기
     ref_extent = ref_pts.max(0) - ref_pts.min(0)
-    obs_extent = obs_pts.max(0) - obs_pts.min(0)
-
-    # 가장 긴 축 기준으로 스케일
     ref_max = ref_extent.max()
-    obs_max = obs_extent.max()
 
     if ref_max < 1e-8:
         raise RuntimeError("참조 모델 크기가 0")
 
-    scale = obs_max / ref_max
+    if manual_scale is not None:
+        scale = manual_scale
+        print(f"  스케일: {scale:.6f} (수동 지정)")
+    elif ref_length_mm is not None:
+        # 참조 모델의 가장 긴 축 = ref_length_mm (m)
+        scale = (ref_length_mm / 1000.0) / ref_max
+        print(f"  스케일: {scale:.6f} (실제 길이 {ref_length_mm:.1f}mm 기준, "
+              f"ref_max={ref_max:.4f})")
+    else:
+        obs_pts = np.asarray(obs_pcd.points)
+        obs_extent = obs_pts.max(0) - obs_pts.min(0)
+        obs_max = obs_extent.max()
+        scale = obs_max / ref_max
+        print(f"  스케일: {scale:.6f} (자동 bbox: ref_max={ref_max:.4f} → "
+              f"obs_max={obs_max:.4f}m)")
+
     ref_pts_scaled = ref_pts * scale
     ref_scaled = o3d.geometry.PointCloud()
     ref_scaled.points = o3d.utility.Vector3dVector(ref_pts_scaled)
@@ -134,7 +151,9 @@ def scale_reference_to_observation(ref_pcd, obs_pcd) -> Tuple["open3d.geometry.P
     if ref_pcd.has_normals():
         ref_scaled.normals = ref_pcd.normals
 
-    print(f"  스케일: {scale:.6f} (ref_max={ref_max:.4f} → obs_max={obs_max:.4f})")
+    scaled_extent = ref_pts_scaled.max(0) - ref_pts_scaled.min(0)
+    print(f"  스케일 후 크기: {scaled_extent[0]*1000:.1f} x "
+          f"{scaled_extent[1]*1000:.1f} x {scaled_extent[2]*1000:.1f} mm")
     return ref_scaled, scale
 
 
@@ -985,6 +1004,14 @@ def main():
     ap.add_argument("--box_threshold", type=float, default=0.15)
     ap.add_argument("--text_threshold", type=float, default=0.15)
 
+    # 스케일 지정 (우선순위: --scale > --ref_length_mm > 자동)
+    ap.add_argument("--ref_length_mm", type=float, default=None,
+                    help="물체 실제 길이 mm (예: --ref_length_mm 150). "
+                         "지정 시 bbox 자동 스케일 대신 이 값으로 스케일 고정")
+    ap.add_argument("--scale", type=float, default=None,
+                    help="참조 모델 스케일 직접 지정 (예: --scale 0.1501). "
+                         "지정 시 자동 스케일 무시")
+
     # ICP 파라미터
     ap.add_argument("--icp_dist", type=float, default=10.0,
                     help="ICP max correspondence distance (mm, default: 10)")
@@ -1041,7 +1068,11 @@ def main():
 
     # ── Step 4: 스케일 맞추기 + ICP 정합 ───────────────────────────
     print(f"\n[Step 4] ICP 정합")
-    ref_scaled, scale = scale_reference_to_observation(ref_pcd, obs_pcd)
+    ref_scaled, scale = scale_reference_to_observation(
+        ref_pcd, obs_pcd,
+        ref_length_mm=args.ref_length_mm,
+        manual_scale=args.scale,
+    )
 
     icp_dist_m = args.icp_dist / 1000.0
     T_icp, fitness, rmse = estimate_pose_icp(
