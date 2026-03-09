@@ -243,7 +243,7 @@ def detect_objects(
 
     results = processor.post_process_grounded_object_detection(
         outputs, inputs.input_ids,
-        threshold=box_threshold,
+        threshold=args.box_threshold,
         text_threshold=text_threshold,
         target_sizes=[(h, w)],
     )

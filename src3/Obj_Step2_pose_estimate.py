@@ -407,7 +407,7 @@ def run_sam2_segmentation(args, cams, K_m, D_m, ds_m, T_m, pad):
             outputs = gm(**inputs)
         results = gp.post_process_grounded_object_detection(
             outputs, inputs.input_ids,
-            box_threshold=args.box_threshold,
+            threshold=args.box_threshold,
             text_threshold=args.text_threshold,
             target_sizes=[pil_img.size[::-1]]
         )[0]

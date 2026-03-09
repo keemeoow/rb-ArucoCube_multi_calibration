@@ -1,0 +1,59 @@
+========================================================
+  Obj_Step2_pose_estimate.py
+  method   : GLB Reference + ICP
+  ref_model: data/reference_knife.glb
+  seg_mode : sam2
+  frame    : 3
+========================================================
+
+[Step 1] 참조 모델 로드: data/reference_knife.glb
+  참조 모델: 30,000 pts
+  원본 bbox: 0.3023 x 0.1764 x 0.9987
+
+[Step 2] 캘리브레이션 로드
+  카메라: [0, 1, 2]
+
+[Step 3] 세그멘테이션 (sam2)
+  GroundingDINO + SAM2 로딩 (device=cpu)...
+The image processor of type `GroundingDinoImageProcessor` is now loaded as a fast processor by default, even if the model checkpoint was saved with a slow proce
+ssor. This is a breaking change and may produce slightly different outputs. To continue using the slow processor, instantiate this class with `use_fast=False`. Loading weights: 100%|███████████████████████████████████████████████████████████████████████████████████████| 990/990 [00:00<00:00, 7822.47it/s]
+  GroundingDINO: IDEA-Research/grounding-dino-tiny → cpu
+  SAM2: /home/sprout/Desktop/**jiwoo/rb-ArucoCube_multi_calibration-1/src3/checkpoints/sam2.1_hiera_large.pt → cpu
+    cam0: score=0.530
+    cam1: score=0.670
+    cam2: score=0.459
+    cam0: 1,842 pts → cam0
+    cam1: 11,521 pts → cam0
+    cam2: 1,911 pts → cam0
+    SOR: 15,274 → 13,722
+  관측 점군: 13,722 pts
+  bbox: 96.1 x 40.0 x 114.1 mm
+
+[Step 4] ICP 정합
+  스케일: 0.114203 (ref_max=0.9987 → obs_max=0.1141)
+    PCA 초기 정렬 완료
+    ICP [coarse] dist=40.0mm: fitness=1.0000, RMSE=4.270mm
+    ICP [medium] dist=20.0mm: fitness=1.0000, RMSE=4.270mm
+    ICP [fine] dist=10.0mm: fitness=0.9554, RMSE=4.182mm
+    ICP [flip]  fitness=0.9547, RMSE=4.072mm
+    → 180도 반전 결과 채택
+
+========================================================
+  RESULT — cam0 (X-right, Y-down, Z-forward)
+  method: GLB reference + ICP
+========================================================
+  Position   (mm): (-87.8, +64.7, +309.2)
+  Euler XYZ (deg): (+179.5, +33.1, -31.7)
+  Quat wxyz      : (0.07354, -0.92247, 0.26049, 0.27531)
+  ICP fitness    : 0.9547
+  ICP RMSE  (mm) : 4.072
+  Scale factor   : 0.114203
+  소요시간       : 67.1s
+========================================================
+  [저장] /home/sprout/Desktop/**jiwoo/rb-ArucoCube_multi_calibration-1/src3/Obj_Step2_output/output_frame000003/pose_frame000003.json
+  [저장] /home/sprout/Desktop/**jiwoo/rb-ArucoCube_multi_calibration-1/src3/Obj_Step2_output/output_frame000003/observed_pointcloud_frame000003.ply
+  [저장] /home/sprout/Desktop/**jiwoo/rb-ArucoCube_multi_calibration-1/src3/Obj_Step2_output/output_frame000003/aligned_reference_frame000003.ply
+  [저장] /home/sprout/Desktop/**jiwoo/rb-ArucoCube_multi_calibration-1/src3/Obj_Step2_output/output_frame000003/icp_alignment_frame000003.png
+  [저장] /home/sprout/Desktop/**jiwoo/rb-ArucoCube_multi_calibration-1/src3/Obj_Step2_output/output_frame000003/pose_cam0_frame000003.png
+
+완료!
