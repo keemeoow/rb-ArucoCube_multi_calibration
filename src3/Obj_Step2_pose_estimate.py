@@ -69,7 +69,7 @@ def load_reference_model(path: str) -> "open3d.geometry.PointCloud":
         import trimesh
         scene = trimesh.load(path, force="scene")
         if isinstance(scene, trimesh.Scene):
-            mesh_tm = scene.dump(concatenate=True)
+            mesh_tm = scene.to_geometry() if hasattr(scene, 'to_geometry') else scene.dump(concatenate=True)
         else:
             mesh_tm = scene
         # trimesh → Open3D mesh → 점군 샘플링
