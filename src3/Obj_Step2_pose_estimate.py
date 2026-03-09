@@ -364,6 +364,91 @@ def run_hsv_segmentation(args, cams, K_m, D_m, ds_m, T_m, pad):
     return pts, rgb
 
 
+def run_depth_roi_segmentation(args, cams, K_m, D_m, ds_m, T_m, pad):
+    """
+    딥러닝 모델 없이 depth 범위 + 테이블 평면 제거 + DBSCAN으로 물체 추출.
+
+    원리:
+      1. 전체 depth 이미지를 z_min~z_max 범위로 필터링
+      2. 멀티뷰 융합 → cam0 좌표계 점군
+      3. RANSAC으로 테이블 평면 제거
+      4. 평면 위 점군에서 DBSCAN 가장 큰 클러스터 = 물체
+    """
+    import open3d as o3d
+    from sklearn.cluster import DBSCAN
+
+    fid = f"{args.frame:0{pad}d}"
+    all_pts, all_rgb = [], []
+
+    for ci in cams:
+        rp = os.path.join(args.capture_dir, f"cam{ci}", f"rgb_{fid}.jpg")
+        dp = os.path.join(args.capture_dir, f"cam{ci}", f"depth_{fid}.png")
+        if not (os.path.exists(rp) and os.path.exists(dp)):
+            continue
+        bgr = cv2.imread(rp)
+        dep = cv2.imread(dp, cv2.IMREAD_UNCHANGED)
+        if bgr is None or dep is None:
+            continue
+
+        full_mask = np.ones(dep.shape[:2], dtype=bool)
+        pts_ci, uvs = depth_to_pts(dep, full_mask, K_m[ci], D_m[ci],
+                                    ds_m[ci], args.z_min, args.z_max)
+        if len(pts_ci) == 0:
+            continue
+
+        T = T_m[ci]
+        pts_cam0 = pts_ci @ T[:3, :3].T + T[:3, 3]
+        ui, vi = uvs[:, 0].astype(int), uvs[:, 1].astype(int)
+        rgb_ci = bgr[vi, ui][:, ::-1] / 255.0
+        all_pts.append(pts_cam0)
+        all_rgb.append(rgb_ci)
+        print(f"    cam{ci}: {len(pts_ci):,} pts → cam0")
+
+    if not all_pts:
+        raise RuntimeError("depth 점군 없음")
+
+    pts = np.concatenate(all_pts)
+    rgb = np.concatenate(all_rgb)
+    print(f"    전체 점군: {len(pts):,} pts")
+
+    # RANSAC 테이블 평면 제거
+    pcd_o3d = o3d.geometry.PointCloud()
+    pcd_o3d.points = o3d.utility.Vector3dVector(pts)
+    plane_model, inliers = pcd_o3d.segment_plane(
+        distance_threshold=0.005,   # 5mm 이내 = 테이블
+        ransac_n=3,
+        num_iterations=1000,
+    )
+    inlier_mask = np.zeros(len(pts), dtype=bool)
+    inlier_mask[inliers] = True
+    above_plane = ~inlier_mask
+    pts = pts[above_plane]
+    rgb = rgb[above_plane]
+    print(f"    테이블 제거 후: {len(pts):,} pts "
+          f"(평면 법선: [{plane_model[0]:.2f},{plane_model[1]:.2f},{plane_model[2]:.2f}])")
+
+    if len(pts) < 50:
+        raise RuntimeError("평면 제거 후 점군 부족")
+
+    # SOR
+    pts, rgb = sor(pts, rgb)
+
+    # DBSCAN — 가장 큰 클러스터 = 물체
+    db = DBSCAN(eps=0.005, min_samples=10).fit(pts)
+    labels = db.labels_
+    unique, counts = np.unique(labels[labels >= 0], return_counts=True)
+    if len(unique) == 0:
+        raise RuntimeError("DBSCAN 클러스터 없음")
+
+    best_label = unique[np.argmax(counts)]
+    mask_cl = labels == best_label
+    print(f"    DBSCAN: {len(unique)} 클러스터, 최대={mask_cl.sum():,} pts 채택")
+    pts = pts[mask_cl]
+    rgb = rgb[mask_cl]
+
+    return pts, rgb
+
+
 def run_sam2_segmentation(args, cams, K_m, D_m, ds_m, T_m, pad):
     """GroundingDINO + SAM2로 물체 세그멘테이션."""
     sam_dir = os.path.join(_THIS_DIR,
@@ -881,8 +966,8 @@ def main():
     ap.add_argument("--z_max", type=float, default=1.5)
 
     # 세그멘테이션 모드
-    ap.add_argument("--seg_mode", choices=["hsv", "sam2"], default="hsv",
-                    help="세그멘테이션 방식: hsv(기본) / sam2")
+    ap.add_argument("--seg_mode", choices=["hsv", "sam2", "depth_roi"], default="hsv",
+                    help="세그멘테이션 방식: hsv(기본) / sam2 / depth_roi(모델 없음)")
 
     # HSV 파라미터
     ap.add_argument("--hsv_h_range", type=int, nargs=2, default=[15, 35])
@@ -939,6 +1024,8 @@ def main():
     print(f"\n[Step 3] 세그멘테이션 ({args.seg_mode})")
     if args.seg_mode == "hsv":
         obs_pts, obs_rgb = run_hsv_segmentation(args, cams, K_m, D_m, ds_m, T_m, pad)
+    elif args.seg_mode == "depth_roi":
+        obs_pts, obs_rgb = run_depth_roi_segmentation(args, cams, K_m, D_m, ds_m, T_m, pad)
     else:
         obs_pts, obs_rgb = run_sam2_segmentation(args, cams, K_m, D_m, ds_m, T_m, pad)
 
