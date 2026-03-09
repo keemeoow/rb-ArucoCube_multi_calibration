@@ -88,6 +88,12 @@ def load_reference_model(path: str) -> "open3d.geometry.PointCloud":
     if len(pts) == 0:
         raise RuntimeError(f"참조 모델이 비어있음: {path}")
 
+    # SAM 3D Objects는 Y-up (OpenGL) 좌표계 → cam0 Y-down (OpenCV)로 변환
+    if ext in (".glb", ".gltf"):
+        pts[:, 1] = -pts[:, 1]  # Y 반전
+        pts[:, 2] = -pts[:, 2]  # Z 반전
+        print(f"  [좌표계 변환] OpenGL(Y-up) → OpenCV(Y-down): Y,Z 반전")
+
     # 중심을 원점으로 이동
     centroid = pts.mean(axis=0)
     pts -= centroid
