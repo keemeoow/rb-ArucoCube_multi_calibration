@@ -1051,12 +1051,8 @@ def main():
     ap.add_argument("--z_max", type=float, default=1.5)
 
     # 세그멘테이션 모드
-    ap.add_argument("--seg_mode", choices=["hsv", "sam2", "depth_roi"], default="hsv",
-<<<<<<< HEAD
-                help="세그멘테이션 방식: hsv(기본) / sam2 / depth_roi")
-=======
-                    help="세그멘테이션 방식: hsv(기본) / sam2 / depth_roi(모델 없음)")
->>>>>>> d6f6e0fb54ff05ae64f72de015155cd0c2b5aa26
+    ap.add_argument("--seg_mode", choices=["hsv", "sam2"], default="hsv",
+                    help="세그멘테이션 방식: hsv(기본) / sam2")
 
     # HSV 파라미터
     ap.add_argument("--hsv_h_range", type=int, nargs=2, default=[15, 35])
@@ -1121,13 +1117,7 @@ def main():
     print(f"\n[Step 3] 세그멘테이션 ({args.seg_mode})")
     if args.seg_mode == "hsv":
         obs_pts, obs_rgb = run_hsv_segmentation(args, cams, K_m, D_m, ds_m, T_m, pad)
-<<<<<<< HEAD
-    elif args.seg_mode == "sam2":
-=======
-    elif args.seg_mode == "depth_roi":
-        obs_pts, obs_rgb = run_depth_roi_segmentation(args, cams, K_m, D_m, ds_m, T_m, pad)
     else:
->>>>>>> d6f6e0fb54ff05ae64f72de015155cd0c2b5aa26
         obs_pts, obs_rgb = run_sam2_segmentation(args, cams, K_m, D_m, ds_m, T_m, pad)
     else:
         obs_pts, obs_rgb = run_depth_roi_segmentation(args, cams, K_m, D_m, ds_m, T_m, pad)
