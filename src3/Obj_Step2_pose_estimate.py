@@ -440,6 +440,69 @@ def run_sam2_segmentation(args, cams, K_m, D_m, ds_m, T_m, pad):
         raise RuntimeError("융합 점군 부족")
     return pts, rgb
 
+def run_depth_roi_segmentation(args, cams, K_m, D_m, ds_m, T_m, pad):
+    """
+    - depth를 z_min~z_max로 threshold
+    - (옵션) roi_xyxy로 crop
+    - 가장 큰 connected component 선택
+    - 기존 방식대로 backproject + cam0로 변환 + merge
+    """
+    all_pts = []
+    all_rgb = []
+
+    for ci in cams:
+        # 1) 프레임 로드 (네 코드에 맞게 경로/로더 사용)
+        rgb, depth = load_rgb_depth(ci, args.frame, args.capture_dir, pad)  # <- 너 코드에 맞게 연결
+        if rgb is None or depth is None:
+            continue
+
+        # 2) depth to meters
+        depth_m = depth.astype(np.float32) * float(ds_m[ci])  # ds_m이 meter-per-unit(예: 0.001)인 경우
+        # 만약 ds_m이 1000 방식이면: depth_m = depth.astype(np.float32) / float(ds_m[ci])
+
+        # 3) z range mask
+        mask = (depth_m > args.z_min) & (depth_m < args.z_max)
+
+        # 4) ROI crop (optional)
+        if args.roi_xyxy is not None:
+            x1,y1,x2,y2 = args.roi_xyxy
+            roi = np.zeros_like(mask, dtype=bool)
+            roi[y1:y2, x1:x2] = True
+            mask &= roi
+
+        # 5) morphology(optional)
+        if args.depth_erosion > 0:
+            k = np.ones((3,3), np.uint8)
+            m = mask.astype(np.uint8) * 255
+            for _ in range(args.depth_erosion):
+                m = cv2.erode(m, k, iterations=1)
+            mask = (m > 0)
+
+        # 6) largest connected component
+        m8 = (mask.astype(np.uint8) * 255)
+        num, labels, stats, _ = cv2.connectedComponentsWithStats(m8, connectivity=8)
+        if num <= 1:
+            continue
+        # 0 is background
+        best = 1 + np.argmax(stats[1:, cv2.CC_STAT_AREA])
+        mask = (labels == best)
+
+        # 7) backproject -> points (너 코드의 backproject 함수/로직 사용)
+        pts_ci, rgb_ci = backproject_points(K_m[ci], depth_m, mask, rgb)  # <- 너 코드에 맞게 연결
+
+        # 8) cam0로 변환해서 합치기
+        pts_c0 = transform_points(T_m[ci], pts_ci)  # <- T_m이 T_C0_Ci 라면 그대로
+        all_pts.append(pts_c0)
+        all_rgb.append(rgb_ci)
+
+    if len(all_pts) == 0:
+        raise RuntimeError("depth_roi: no points. check z_min/z_max/roi.")
+
+    obs_pts = np.vstack(all_pts)
+    obs_rgb = (np.vstack(all_rgb) if len(all_rgb) else None)
+
+    # 여기 아래는 네 hsv 모드와 동일하게 SOR/DBSCAN 등 후처리 넣으면 됨
+    return obs_pts, obs_rgb
 
 # ──────────────────────────────────────────────────────────────────
 #  5. ICP 정합 → 6-DOF 포즈 추정
@@ -869,8 +932,11 @@ def main():
 """)
 
     # 참조 모델
-    ap.add_argument("--ref_model", required=True,
-                    help="참조 3D 모델 경로 (GLB/PLY/OBJ)")
+    ap.add_argument("--roi_xyxy", type=int, nargs=4, default=None,
+                metavar=("x1","y1","x2","y2"),
+                help="depth_roi 모드에서 사용할 ROI (픽셀). 미지정이면 전체 사용")
+    ap.add_argument("--depth_erosion", type=int, default=0,
+                help="depth_roi 모드에서 마스크 erosion 횟수(노이즈 제거)")
 
     # 입력
     ap.add_argument("--capture_dir", default=_DEFAULT_CAP_DIR)
@@ -881,8 +947,8 @@ def main():
     ap.add_argument("--z_max", type=float, default=1.5)
 
     # 세그멘테이션 모드
-    ap.add_argument("--seg_mode", choices=["hsv", "sam2"], default="hsv",
-                    help="세그멘테이션 방식: hsv(기본) / sam2")
+    ap.add_argument("--seg_mode", choices=["hsv", "sam2", "depth_roi"], default="hsv",
+                help="세그멘테이션 방식: hsv(기본) / sam2 / depth_roi")
 
     # HSV 파라미터
     ap.add_argument("--hsv_h_range", type=int, nargs=2, default=[15, 35])
@@ -939,8 +1005,10 @@ def main():
     print(f"\n[Step 3] 세그멘테이션 ({args.seg_mode})")
     if args.seg_mode == "hsv":
         obs_pts, obs_rgb = run_hsv_segmentation(args, cams, K_m, D_m, ds_m, T_m, pad)
-    else:
+    elif args.seg_mode == "sam2":
         obs_pts, obs_rgb = run_sam2_segmentation(args, cams, K_m, D_m, ds_m, T_m, pad)
+    else:
+        obs_pts, obs_rgb = run_depth_roi_segmentation(args, cams, K_m, D_m, ds_m, T_m, pad)
 
     obs_bbox = (obs_pts.max(0) - obs_pts.min(0)) * 1000
     print(f"  관측 점군: {len(obs_pts):,} pts")
