@@ -107,25 +107,42 @@ def load_reference_model(path: str) -> "open3d.geometry.PointCloud":
     return pcd
 
 
-def scale_reference_to_observation(ref_pcd, obs_pcd) -> Tuple["open3d.geometry.PointCloud", float]:
-    """참조 모델을 관측 점군 크기에 맞게 스케일링."""
+def scale_reference_to_observation(ref_pcd, obs_pcd,
+                                    ref_length_mm: float = None,
+                                    manual_scale: float = None
+                                    ) -> Tuple["open3d.geometry.PointCloud", float]:
+    """참조 모델을 실제 크기에 맞게 스케일링.
+
+    우선순위:
+      1. manual_scale: 직접 지정한 스케일 값
+      2. ref_length_mm: 실제 물체 길이(mm)로 역산
+      3. 자동(bbox 비교): 관측 점군의 가장 긴 축 기준
+    """
     import open3d as o3d
 
     ref_pts = np.asarray(ref_pcd.points)
-    obs_pts = np.asarray(obs_pcd.points)
-
-    # 각각의 OBB 크기
     ref_extent = ref_pts.max(0) - ref_pts.min(0)
-    obs_extent = obs_pts.max(0) - obs_pts.min(0)
-
-    # 가장 긴 축 기준으로 스케일
     ref_max = ref_extent.max()
-    obs_max = obs_extent.max()
 
     if ref_max < 1e-8:
         raise RuntimeError("참조 모델 크기가 0")
 
-    scale = obs_max / ref_max
+    if manual_scale is not None:
+        scale = manual_scale
+        print(f"  스케일: {scale:.6f} (수동 지정)")
+    elif ref_length_mm is not None:
+        # 참조 모델의 가장 긴 축 = ref_length_mm (m)
+        scale = (ref_length_mm / 1000.0) / ref_max
+        print(f"  스케일: {scale:.6f} (실제 길이 {ref_length_mm:.1f}mm 기준, "
+              f"ref_max={ref_max:.4f})")
+    else:
+        obs_pts = np.asarray(obs_pcd.points)
+        obs_extent = obs_pts.max(0) - obs_pts.min(0)
+        obs_max = obs_extent.max()
+        scale = obs_max / ref_max
+        print(f"  스케일: {scale:.6f} (자동 bbox: ref_max={ref_max:.4f} → "
+              f"obs_max={obs_max:.4f}m)")
+
     ref_pts_scaled = ref_pts * scale
     ref_scaled = o3d.geometry.PointCloud()
     ref_scaled.points = o3d.utility.Vector3dVector(ref_pts_scaled)
@@ -134,7 +151,9 @@ def scale_reference_to_observation(ref_pcd, obs_pcd) -> Tuple["open3d.geometry.P
     if ref_pcd.has_normals():
         ref_scaled.normals = ref_pcd.normals
 
-    print(f"  스케일: {scale:.6f} (ref_max={ref_max:.4f} → obs_max={obs_max:.4f})")
+    scaled_extent = ref_pts_scaled.max(0) - ref_pts_scaled.min(0)
+    print(f"  스케일 후 크기: {scaled_extent[0]*1000:.1f} x "
+          f"{scaled_extent[1]*1000:.1f} x {scaled_extent[2]*1000:.1f} mm")
     return ref_scaled, scale
 
 
@@ -360,6 +379,91 @@ def run_hsv_segmentation(args, cams, K_m, D_m, ds_m, T_m, pad):
         print(f"    DBSCAN: {len(unique)} 클러스터, 최대={mask_cl.sum():,} pts")
         pts = pts[mask_cl]
         rgb = rgb[mask_cl] if rgb is not None else None
+
+    return pts, rgb
+
+
+def run_depth_roi_segmentation(args, cams, K_m, D_m, ds_m, T_m, pad):
+    """
+    딥러닝 모델 없이 depth 범위 + 테이블 평면 제거 + DBSCAN으로 물체 추출.
+
+    원리:
+      1. 전체 depth 이미지를 z_min~z_max 범위로 필터링
+      2. 멀티뷰 융합 → cam0 좌표계 점군
+      3. RANSAC으로 테이블 평면 제거
+      4. 평면 위 점군에서 DBSCAN 가장 큰 클러스터 = 물체
+    """
+    import open3d as o3d
+    from sklearn.cluster import DBSCAN
+
+    fid = f"{args.frame:0{pad}d}"
+    all_pts, all_rgb = [], []
+
+    for ci in cams:
+        rp = os.path.join(args.capture_dir, f"cam{ci}", f"rgb_{fid}.jpg")
+        dp = os.path.join(args.capture_dir, f"cam{ci}", f"depth_{fid}.png")
+        if not (os.path.exists(rp) and os.path.exists(dp)):
+            continue
+        bgr = cv2.imread(rp)
+        dep = cv2.imread(dp, cv2.IMREAD_UNCHANGED)
+        if bgr is None or dep is None:
+            continue
+
+        full_mask = np.ones(dep.shape[:2], dtype=bool)
+        pts_ci, uvs = depth_to_pts(dep, full_mask, K_m[ci], D_m[ci],
+                                    ds_m[ci], args.z_min, args.z_max)
+        if len(pts_ci) == 0:
+            continue
+
+        T = T_m[ci]
+        pts_cam0 = pts_ci @ T[:3, :3].T + T[:3, 3]
+        ui, vi = uvs[:, 0].astype(int), uvs[:, 1].astype(int)
+        rgb_ci = bgr[vi, ui][:, ::-1] / 255.0
+        all_pts.append(pts_cam0)
+        all_rgb.append(rgb_ci)
+        print(f"    cam{ci}: {len(pts_ci):,} pts → cam0")
+
+    if not all_pts:
+        raise RuntimeError("depth 점군 없음")
+
+    pts = np.concatenate(all_pts)
+    rgb = np.concatenate(all_rgb)
+    print(f"    전체 점군: {len(pts):,} pts")
+
+    # RANSAC 테이블 평면 제거
+    pcd_o3d = o3d.geometry.PointCloud()
+    pcd_o3d.points = o3d.utility.Vector3dVector(pts)
+    plane_model, inliers = pcd_o3d.segment_plane(
+        distance_threshold=0.005,   # 5mm 이내 = 테이블
+        ransac_n=3,
+        num_iterations=1000,
+    )
+    inlier_mask = np.zeros(len(pts), dtype=bool)
+    inlier_mask[inliers] = True
+    above_plane = ~inlier_mask
+    pts = pts[above_plane]
+    rgb = rgb[above_plane]
+    print(f"    테이블 제거 후: {len(pts):,} pts "
+          f"(평면 법선: [{plane_model[0]:.2f},{plane_model[1]:.2f},{plane_model[2]:.2f}])")
+
+    if len(pts) < 50:
+        raise RuntimeError("평면 제거 후 점군 부족")
+
+    # SOR
+    pts, rgb = sor(pts, rgb)
+
+    # DBSCAN — 가장 큰 클러스터 = 물체
+    db = DBSCAN(eps=0.005, min_samples=10).fit(pts)
+    labels = db.labels_
+    unique, counts = np.unique(labels[labels >= 0], return_counts=True)
+    if len(unique) == 0:
+        raise RuntimeError("DBSCAN 클러스터 없음")
+
+    best_label = unique[np.argmax(counts)]
+    mask_cl = labels == best_label
+    print(f"    DBSCAN: {len(unique)} 클러스터, 최대={mask_cl.sum():,} pts 채택")
+    pts = pts[mask_cl]
+    rgb = rgb[mask_cl]
 
     return pts, rgb
 
@@ -948,7 +1052,11 @@ def main():
 
     # 세그멘테이션 모드
     ap.add_argument("--seg_mode", choices=["hsv", "sam2", "depth_roi"], default="hsv",
+<<<<<<< HEAD
                 help="세그멘테이션 방식: hsv(기본) / sam2 / depth_roi")
+=======
+                    help="세그멘테이션 방식: hsv(기본) / sam2 / depth_roi(모델 없음)")
+>>>>>>> d6f6e0fb54ff05ae64f72de015155cd0c2b5aa26
 
     # HSV 파라미터
     ap.add_argument("--hsv_h_range", type=int, nargs=2, default=[15, 35])
@@ -965,6 +1073,14 @@ def main():
     ap.add_argument("--device", default="mps")
     ap.add_argument("--box_threshold", type=float, default=0.15)
     ap.add_argument("--text_threshold", type=float, default=0.15)
+
+    # 스케일 지정 (우선순위: --scale > --ref_length_mm > 자동)
+    ap.add_argument("--ref_length_mm", type=float, default=None,
+                    help="물체 실제 길이 mm (예: --ref_length_mm 150). "
+                         "지정 시 bbox 자동 스케일 대신 이 값으로 스케일 고정")
+    ap.add_argument("--scale", type=float, default=None,
+                    help="참조 모델 스케일 직접 지정 (예: --scale 0.1501). "
+                         "지정 시 자동 스케일 무시")
 
     # ICP 파라미터
     ap.add_argument("--icp_dist", type=float, default=10.0,
@@ -1005,7 +1121,13 @@ def main():
     print(f"\n[Step 3] 세그멘테이션 ({args.seg_mode})")
     if args.seg_mode == "hsv":
         obs_pts, obs_rgb = run_hsv_segmentation(args, cams, K_m, D_m, ds_m, T_m, pad)
+<<<<<<< HEAD
     elif args.seg_mode == "sam2":
+=======
+    elif args.seg_mode == "depth_roi":
+        obs_pts, obs_rgb = run_depth_roi_segmentation(args, cams, K_m, D_m, ds_m, T_m, pad)
+    else:
+>>>>>>> d6f6e0fb54ff05ae64f72de015155cd0c2b5aa26
         obs_pts, obs_rgb = run_sam2_segmentation(args, cams, K_m, D_m, ds_m, T_m, pad)
     else:
         obs_pts, obs_rgb = run_depth_roi_segmentation(args, cams, K_m, D_m, ds_m, T_m, pad)
@@ -1022,7 +1144,11 @@ def main():
 
     # ── Step 4: 스케일 맞추기 + ICP 정합 ───────────────────────────
     print(f"\n[Step 4] ICP 정합")
-    ref_scaled, scale = scale_reference_to_observation(ref_pcd, obs_pcd)
+    ref_scaled, scale = scale_reference_to_observation(
+        ref_pcd, obs_pcd,
+        ref_length_mm=args.ref_length_mm,
+        manual_scale=args.scale,
+    )
 
     icp_dist_m = args.icp_dist / 1000.0
     T_icp, fitness, rmse = estimate_pose_icp(
