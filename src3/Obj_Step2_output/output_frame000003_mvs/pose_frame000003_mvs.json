@@ -1,0 +1,43 @@
+{
+  "coordinate_frame": "cam0 (OpenCV: X-right, Y-down, Z-forward)",
+  "method": "GLB_reference_MVS",
+  "pose_mode": "mvs",
+  "reference_model": "/Users/woo/Documents/GitHub/Robot-Lab/rb-ArucoCube_multi_calibration/src3/data/reference_knife.glb",
+  "position_mm": [
+    -118.63558952471698,
+    11.234454370865112,
+    514.7954288314892
+  ],
+  "euler_xyz_deg": [
+    149.80803463279312,
+    63.228002224885394,
+    146.53249926836946
+  ],
+  "quaternion_wxyz": [
+    0.5485307263760558,
+    0.10599658353366208,
+    0.8267001399038165,
+    0.06667567160185497
+  ],
+  "rotation_matrix": [
+    [
+      -0.3757575330010963,
+      0.10210747172245614,
+      0.9210756432624724
+    ],
+    [
+      0.24840209002396357,
+      0.9686381581912665,
+      -0.006043191835331092
+    ],
+    [
+      -0.8928060696840366,
+      0.22652634000106855,
+      -0.389336794075597
+    ]
+  ],
+  "icp_fitness": 0.2907,
+  "icp_rmse_mm": 5.08058698387167,
+  "scale_factor": 0.5118840724150393,
+  "elapsed_sec": 7.37
+}
