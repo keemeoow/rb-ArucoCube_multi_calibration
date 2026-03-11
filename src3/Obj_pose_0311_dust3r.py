@@ -30,6 +30,7 @@ import glob
 import json
 import os
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -43,9 +44,29 @@ if _DUST3R_ROOT.exists():
     sys.path.insert(0, str(_DUST3R_ROOT))
 
 _THIS_DIR = Path(__file__).resolve().parent
-_DEFAULT_CAP_DIR = _THIS_DIR / "data/object_capture"
-_DEFAULT_CAL_DIR = _THIS_DIR / "data/cube_session_01/calib_out_cube"
-_DEFAULT_INT_DIR = _THIS_DIR / "data/_intrinsics"
+_PROJECT_ROOT = _THIS_DIR.parent
+
+
+def _pick_existing(*candidates: Path) -> Path:
+    for p in candidates:
+        if p.exists():
+            return p
+    return candidates[0]
+
+
+_DEFAULT_CAP_DIR = _pick_existing(
+    _PROJECT_ROOT / "data/object_capture",
+    _THIS_DIR / "data/object_capture",
+    _THIS_DIR / "data/cube_session_01",
+)
+_DEFAULT_CAL_DIR = _pick_existing(
+    _PROJECT_ROOT / "data/cube_session_01/calib_out_cube",
+    _THIS_DIR / "data/cube_session_01/calib_out_cube",
+)
+_DEFAULT_INT_DIR = _pick_existing(
+    _PROJECT_ROOT / "data/_intrinsics",
+    _THIS_DIR / "data/_intrinsics",
+)
 _DEFAULT_OUT_DIR = _THIS_DIR / "Obj_pose_0311_dust3r_output"
 
 
@@ -94,11 +115,46 @@ def frame_pad(cap_dir: Path, ci: int) -> int:
 #  2. DUSt3R 추론 + Global Alignment
 # ======================================================================
 
+def resolve_device(device: str) -> str:
+    import torch
+
+    d = device.lower()
+    if d == "auto":
+        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            try:
+                _ = torch.empty(1, device="mps")
+                return "mps"
+            except Exception:
+                pass
+        if torch.cuda.is_available():
+            return "cuda"
+        return "cpu"
+
+    if d == "mps":
+        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            try:
+                _ = torch.empty(1, device="mps")
+                return "mps"
+            except Exception as e:
+                print(f"[DUSt3R] MPS 초기화 실패, CPU로 폴백: {e}")
+        else:
+            print("[DUSt3R] MPS 사용 불가, CPU로 폴백")
+        return "cpu"
+
+    if d == "cuda":
+        if torch.cuda.is_available():
+            return "cuda"
+        print("[DUSt3R] CUDA 사용 불가, CPU로 폴백")
+        return "cpu"
+
+    return "cpu"
+
+
 def run_dust3r(image_paths: List[str],
                known_intrinsics: Optional[List[np.ndarray]] = None,
                known_poses: Optional[List[np.ndarray]] = None,
                image_size: int = 512,
-               device: str = "mps",
+               device: str = "auto",
                niter: int = 300) -> dict:
     """
     DUSt3R 추론 → global alignment → 3D 점군 + 깊이 맵 + 카메라 포즈.
@@ -122,6 +178,7 @@ def run_dust3r(image_paths: List[str],
     from dust3r.cloud_opt import global_aligner, GlobalAlignerMode
     from dust3r.utils.device import to_numpy
 
+    device = resolve_device(device)
     print(f"\n[DUSt3R] 모델 로드 중 (device={device})...")
     model = AsymmetricCroCo3DStereo.from_pretrained("naver/DUSt3R_ViTLarge_BaseDecoder_512_dpt")
 
@@ -162,17 +219,20 @@ def run_dust3r(image_paths: List[str],
             fx_scaled = K[0, 0] * sx
             fy_scaled = K[1, 1] * sy
             focal = (fx_scaled + fy_scaled) / 2.0
-            pp_x = K[0, 2] * sx - dust3r_w / 2.0
-            pp_y = K[1, 2] * sy - dust3r_h / 2.0
+            pp_x = K[0, 2] * sx
+            pp_y = K[1, 2] * sy
             focals.append(focal)
             pps.append([pp_x, pp_y])
         if hasattr(scene, 'preset_focal'):
             scene.preset_focal(focals)
         if hasattr(scene, 'preset_principal_point'):
             import torch as _t
-            scene.preset_principal_point(
-                [_t.tensor(pp, dtype=_t.float32) for pp in pps]
-            )
+            try:
+                scene.preset_principal_point(
+                    [_t.tensor(pp, dtype=_t.float32) for pp in pps]
+                )
+            except AssertionError as e:
+                print(f"[DUSt3R] principal point preset 건너뜀: {e}")
 
     # Known poses 설정 (cam-to-world)
     if known_poses is not None and hasattr(scene, 'preset_pose'):
@@ -230,7 +290,7 @@ def run_dust3r(image_paths: List[str],
 def dust3r_to_cam0(dust3r_result: dict,
                    T_C0_Ci: Dict[int, np.ndarray],
                    use_known_poses: bool = True,
-                   conf_threshold: float = 2.0,
+                   conf_threshold: float = 0.8,
                    z_min: float = 0.05,
                    z_max: float = 1.0) -> Tuple[np.ndarray, np.ndarray]:
     """
@@ -259,6 +319,13 @@ def dust3r_to_cam0(dust3r_result: dict,
 
         # confidence 필터
         mask = conf_flat > conf_threshold
+        if not np.any(mask):
+            finite_conf = conf_flat[np.isfinite(conf_flat)]
+            if finite_conf.size == 0:
+                continue
+            auto_thr = float(np.percentile(finite_conf, 70))
+            mask = conf_flat > auto_thr
+            print(f"    cam{i}: conf_threshold={conf_threshold:.2f}로 0점 -> auto={auto_thr:.2f} 사용")
 
         # NaN/Inf 제거
         valid = np.isfinite(pts_flat).all(axis=1) & mask
@@ -481,6 +548,12 @@ def R_to_quat(R):
 # ======================================================================
 
 def visualize_pointcloud(pts, rgb, pose, out_path, title):
+    mpl_dir = Path(tempfile.gettempdir()) / "rb_dust3r_mpl_cache"
+    mpl_dir.mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("MPLCONFIGDIR", str(mpl_dir))
+
+    import matplotlib
+    matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from mpl_toolkits.mplot3d import Axes3D
 
@@ -671,10 +744,10 @@ def main():
     parser.add_argument("--intrinsics_dir", type=str, default=str(_DEFAULT_INT_DIR))
     parser.add_argument("--output_dir", type=str, default=str(_DEFAULT_OUT_DIR))
     parser.add_argument("--image_size", type=int, default=512, help="DUSt3R 입력 해상도")
-    parser.add_argument("--device", type=str, default="mps",
-                        choices=["mps", "cuda", "cpu"])
+    parser.add_argument("--device", type=str, default="auto",
+                        choices=["auto", "mps", "cuda", "cpu"])
     parser.add_argument("--niter", type=int, default=300, help="Global alignment 반복")
-    parser.add_argument("--conf_threshold", type=float, default=2.0,
+    parser.add_argument("--conf_threshold", type=float, default=0.8,
                         help="DUSt3R confidence 임계값")
     parser.add_argument("--no_known_poses", action="store_true",
                         help="카메라 포즈를 DUSt3R가 추정하도록 함")
@@ -779,9 +852,12 @@ def main():
     save_all(pts, rgb, pose, out_dir, tag, elapsed, dust3r_info)
 
     # 시각화
-    visualize_pointcloud(pts, rgb, pose,
-                         out_dir / f"pointcloud_{tag}.png",
-                         f"DUSt3R Pose - frame {fid}")
+    try:
+        visualize_pointcloud(pts, rgb, pose,
+                             out_dir / f"pointcloud_{tag}.png",
+                             f"DUSt3R Pose - frame {fid}")
+    except Exception as e:
+        print(f"    시각화 건너뜀: {e}")
 
     # cam0 오버레이
     cam0_img = str(cap_dir / f"cam0" / f"rgb_{fid}.jpg")
