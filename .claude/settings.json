@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 src3/Obj_pose_0311.py --sam3d_ply \"src3/Obj_Step2-\\(2\\)_pose_estimate_sam3d/sam3d_knife.ply\" --sam3d_cam 0 --sam3d_refine_icp --seg_mode hsv --frame 3)",
+      "Bash(python3 -c \"import torch; print\\(''''torch:'''', torch.__version__, ''''cuda:'''', torch.cuda.is_available\\(\\), ''''mps:'''', torch.backends.mps.is_available\\(\\)\\)\")",
+      "Bash(find /Users/woo/Documents/GitHub -maxdepth 3 -name *.py -type f)",
+      "Bash(find /Users/woo/Documents/GitHub -type d -name *sam3d* -o -name *3d*)",
+      "Bash(ls -la /Users/woo/Documents/GitHub/Robot-Lab/rb-ArucoCube_multi_calibration/src3/Obj_Step2-\\\\\\(2\\\\\\)_pose_estimate_sam3d/)",
+      "Bash(grep -E \"\\\\.py$|Step|pose|3d\")",
+      "Bash(grep -l \"import torch\\\\|import trellis\\\\|from trellis\\\\|import sam3d\\\\|from sam3d\" /Users/woo/Documents/GitHub/Robot-Lab/rb-ArucoCube_multi_calibration/src3/*.py)",
+      "Bash(find /Users/woo -maxdepth 5 -type f -name requirements*.txt)",
+      "Bash(find /Users/woo/Documents/GitHub/Robot-Lab -name *.md -o -name README*)",
+      "Bash(grep -r \"trellis\\\\|triposr\\\\|wonder3d\\\\|mast3r\\\\|dust3r\\\\|instantmesh\\\\|one.2.3.45\\\\|SAM\" /Users/woo/Documents/GitHub/Robot-Lab/rb-ArucoCube_multi_calibration/src3/*.py)",
+      "Bash(ls -la /Users/woo/Documents/GitHub/Robot-Lab/rb-ArucoCube_multi_calibration/src3/Obj_Step2-\\\\\\(1\\\\\\)_pose_estimate_grounding_sam/)",
+      "Bash(/Users/woo/Documents/GitHub/Robot-Lab/rb-ArucoCube_multi_calibration/src3/.venv/bin/pip list:*)",
+      "Bash(/Users/woo/Documents/GitHub/Robot-Lab/rb-ArucoCube_multi_calibration/src3/.venv/bin/python3 -c \"import sys; print\\(''''\\\\n''''.join\\(sys.path\\)\\)\")",
+      "Bash(grep -r \"foundationpose\\\\|FoundationPose\\\\|foundation_pose\" /Users/woo/Documents/GitHub/Robot-Lab/rb-ArucoCube_multi_calibration/src3/*.py)",
+      "Bash(find /Users/woo/Documents/GitHub/Robot-Lab -type f -name *.py -exec grep -l \"\\\\.ply\\\\|\\\\.obj\\\\|\\\\.glb\\\\|\\\\.gltf\\\\|mesh\\\\|point.*cloud\" {})",
+      "Bash(2)",
+      "Bash(cat /Users/woo/Documents/GitHub/Robot-Lab/rb-ArucoCube_multi_calibration/src3/.venv/lib/python3.13/site-packages/pip-*-info/RECORD)",
+      "Bash(ls -1d /Users/woo/Documents/GitHub/Robot-Lab/rb-ArucoCube_multi_calibration/src3/.venv/lib/python3.13/site-packages/*/)",
+      "Bash(ls -la /Users/woo/Documents/GitHub/Robot-Lab/rb-ArucoCube_multi_calibration/src3/Obj_pose_0311*)"
+    ]
+  }
+}

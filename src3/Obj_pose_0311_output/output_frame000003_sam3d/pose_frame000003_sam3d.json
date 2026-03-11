@@ -1,0 +1,42 @@
+{
+  "coordinate_frame": "cam0 (OpenCV: X-right, Y-down, Z-forward)",
+  "method": "FPFH_RANSAC + ICP",
+  "reference_model": "/Users/woo/Documents/GitHub/Robot-Lab/rb-ArucoCube_multi_calibration/src3/Obj_Step2-(2)_pose_estimate_sam3d/sam3d_knife.ply",
+  "position_mm": [
+    -60.53308706465604,
+    7.364161181515099,
+    417.19558401041803
+  ],
+  "euler_xyz_deg": [
+    -125.10713965349251,
+    -25.045258593111882,
+    -149.00885434493435
+  ],
+  "quaternion_wxyz": [
+    0.06521408878121444,
+    0.3277584000357876,
+    -0.8081401000947366,
+    0.4850063220714609
+  ],
+  "rotation_matrix": [
+    [
+      -0.7766431076608328,
+      -0.5930079031176612,
+      0.2125255517882924
+    ],
+    [
+      -0.46649092172958717,
+      0.3146865975133902,
+      -0.8266550461282662
+    ],
+    [
+      0.42333403272924314,
+      -0.7411571845333754,
+      -0.5210319803503006
+    ]
+  ],
+  "icp_fitness": 0.025307337687283903,
+  "icp_rmse_mm": 2.9300119769157065,
+  "scale_factor": 0.6165268631357546,
+  "elapsed_sec": 5.24
+}

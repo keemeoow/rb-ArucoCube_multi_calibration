@@ -7,7 +7,7 @@ Obj_Step2_pose_estimate.py - GLB 참조 모델 기반 물체 6-DOF 포즈 추정
   foundation : FoundationPose 딥러닝 모델 (실패 시 ICP fallback)
 
 세그멘테이션 모드 (--seg_mode):
-  hsv        : HSV 색상 필터 (기본)
+  hsv        : HSV 앵커 + depth 연결 object mask (기본)
   sam2       : GroundingDINO + SAM2
   depth_roi  : depth ROI + 테이블 제거 + DBSCAN
 
@@ -461,63 +461,150 @@ def compute_hsv_mask(
         (hsv[:, :, 2] >= v_min)
     )
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-    mask = cv2.morphologyEx(mask.astype(np.uint8), cv2.MORPH_OPEN, kernel)
+    mask = cv2.morphologyEx(mask.astype(np.uint8), cv2.MORPH_CLOSE, kernel)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
     return mask.astype(bool)
 
 
-def estimate_blade_dir_from_anchor_pts(anchor_pts_3d: np.ndarray) -> Optional[np.ndarray]:
-    """앵커(노란 손잡이) 3D 점군의 PCA 주축으로부터 날 방향 힌트를 추정한다.
-    부호: 칼날이 이미지 오른쪽(+X 방향)을 향하도록 정렬한다."""
-    if len(anchor_pts_3d) < 10:
+def largest_connected_component(mask: np.ndarray, min_area: int = 1) -> Optional[np.ndarray]:
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask.astype(np.uint8), connectivity=8)
+    best_label = -1
+    best_area = 0
+    for label in range(1, num_labels):
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        if area >= min_area and area > best_area:
+            best_label = label
+            best_area = area
+    if best_label < 0:
         return None
-    c = anchor_pts_3d.mean(axis=0)
-    cov = (anchor_pts_3d - c).T @ (anchor_pts_3d - c) / len(anchor_pts_3d)
-    _, evecs = np.linalg.eigh(cov)
-    blade_dir = evecs[:, -1].copy()  # 가장 큰 고유값 → 긴 축
-    if blade_dir[0] < 0:             # +X (이미지 오른쪽) 방향으로 부호 통일
-        blade_dir = -blade_dir
-    return blade_dir
+    return labels == best_label
 
 
-def run_hsv_segmentation(args: argparse.Namespace, session: CaptureSession) -> ObservationData:
-    """노란 손잡이 앵커를 기준으로 물체 점군을 추출한다."""
-    anchor_points = []
+def component_touching_seed(
+    candidate_mask: np.ndarray,
+    seed_mask: np.ndarray,
+    min_area: int,
+) -> Optional[np.ndarray]:
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(candidate_mask.astype(np.uint8), connectivity=8)
+    if num_labels <= 1:
+        return None
 
-    for camera_id in session.camera_ids:
-        frame = session.frames[camera_id]
-        calibration = session.calibrations[camera_id]
-        if frame.bgr is None or frame.depth is None:
+    seed_dilated = cv2.dilate(
+        seed_mask.astype(np.uint8),
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9)),
+        iterations=2,
+    ).astype(bool)
+
+    keep_mask = np.zeros_like(candidate_mask, dtype=bool)
+    for label in range(1, num_labels):
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        if area < min_area:
             continue
+        component_mask = labels == label
+        if np.any(component_mask & seed_dilated):
+            keep_mask |= component_mask
 
-        yellow_mask = compute_hsv_mask(frame.bgr, args.hsv_h_range, args.hsv_s_min, args.hsv_v_min)
-        if yellow_mask.sum() < args.min_component_area:
-            continue
+    if not keep_mask.any():
+        return None
+    return keep_mask
 
-        points_cam, _ = depth_to_points(
-            frame.depth,
-            yellow_mask,
-            calibration.K,
-            calibration.D,
-            calibration.depth_scale_m_per_unit,
-            args.z_min,
-            args.z_max,
-        )
-        if len(points_cam) == 0:
-            continue
 
-        points_cam0 = transform_points(points_cam, calibration.T_cam0_cam)
-        anchor_points.append(points_cam0)
-        print(f"    cam{camera_id}: HSV 앵커 {len(points_cam0):,} pts")
+def oriented_anchor_roi(anchor_mask: np.ndarray) -> np.ndarray:
+    ys, xs = np.where(anchor_mask)
+    anchor_pixels = np.column_stack([xs, ys]).astype(np.float64)
+    center = anchor_pixels.mean(axis=0)
+    centered = anchor_pixels - center
+    covariance = centered.T @ centered / len(centered)
+    eigenvalues, eigenvectors = np.linalg.eigh(covariance)
+    order = np.argsort(eigenvalues)[::-1]
+    axes = eigenvectors[:, order]
+    projection = centered @ axes
 
-    if not anchor_points:
-        raise RuntimeError("노란 손잡이 앵커 검출 실패")
+    long_half = max((projection[:, 0].max() - projection[:, 0].min()) * 0.5 * 5.5, 55.0)
+    short_half = max((projection[:, 1].max() - projection[:, 1].min()) * 0.5 * 2.5, 22.0)
 
-    anchor_center = np.concatenate(anchor_points).mean(axis=0)
-    print(
-        "    앵커 중심 (cam0): "
-        f"({anchor_center[0] * 1000:.1f}, {anchor_center[1] * 1000:.1f}, {anchor_center[2] * 1000:.1f}) mm"
+    height, width = anchor_mask.shape[:2]
+    vg, ug = np.mgrid[0:height, 0:width]
+    grid = np.column_stack([ug.reshape(-1), vg.reshape(-1)]).astype(np.float64)
+    grid_projection = (grid - center) @ axes
+    roi = (
+        (grid_projection[:, 0] / (long_half + 16.0)) ** 2 +
+        (grid_projection[:, 1] / (short_half + 16.0)) ** 2
+    ) <= 1.0
+    return roi.reshape(height, width)
+
+
+def extract_hsv_object_mask(
+    frame: FrameCapture,
+    calibration: CameraCalibration,
+    args: argparse.Namespace,
+) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray]]:
+    if frame.bgr is None or frame.depth is None:
+        return None, None, None
+
+    yellow_mask = compute_hsv_mask(frame.bgr, args.hsv_h_range, args.hsv_s_min, args.hsv_v_min)
+    anchor_mask = largest_connected_component(yellow_mask, args.min_component_area)
+    if anchor_mask is None:
+        return None, None, None
+
+    anchor_points_cam, _ = depth_to_points(
+        frame.depth,
+        anchor_mask,
+        calibration.K,
+        calibration.D,
+        calibration.depth_scale_m_per_unit,
+        args.z_min,
+        args.z_max,
     )
+    if len(anchor_points_cam) == 0:
+        return anchor_mask, None, None
 
+    depth_m = frame.depth.astype(np.float64) * calibration.depth_scale_m_per_unit
+    anchor_depth_values = depth_m[anchor_mask & (depth_m > args.z_min) & (depth_m < args.z_max)]
+    if len(anchor_depth_values) == 0:
+        return anchor_mask, None, anchor_points_cam
+
+    anchor_depth = float(np.median(anchor_depth_values))
+    roi_mask = oriented_anchor_roi(anchor_mask)
+    object_mask: Optional[np.ndarray] = None
+
+    for front_tol, back_tol in [(0.015, 0.018), (0.020, 0.020), (0.020, 0.025)]:
+        depth_ok = (
+            (frame.depth > 0) &
+            (depth_m > max(args.z_min, anchor_depth - front_tol)) &
+            (depth_m < min(args.z_max, anchor_depth + back_tol))
+        )
+        candidate_mask = roi_mask & depth_ok
+        object_mask = component_touching_seed(
+            candidate_mask,
+            anchor_mask,
+            min_area=max(120, args.min_component_area // 4),
+        )
+        if object_mask is None:
+            continue
+
+        object_mask = cv2.morphologyEx(
+            object_mask.astype(np.uint8),
+            cv2.MORPH_CLOSE,
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)),
+            iterations=1,
+        ).astype(bool)
+        object_mask |= anchor_mask
+
+        area_ratio = object_mask.sum() / max(anchor_mask.sum(), 1)
+        if 1.05 <= area_ratio <= 5.0:
+            break
+    else:
+        object_mask = anchor_mask.copy()
+
+    return anchor_mask, object_mask, anchor_points_cam
+
+
+def run_hsv_anchor_crop_segmentation(
+    args: argparse.Namespace,
+    session: CaptureSession,
+    anchor_center: np.ndarray,
+) -> Tuple[np.ndarray, Optional[np.ndarray]]:
     all_points = []
     all_colors = []
     sphere_radius = 0.12
@@ -568,9 +655,63 @@ def run_hsv_segmentation(args: argparse.Namespace, session: CaptureSession) -> O
         (projection[:, 2] / a_short) ** 2
     )
     keep_mask = ellipsoid_dist < 1.0
-    points = points[keep_mask]
-    colors = colors[keep_mask]
-    print(f"    타원체 크롭: {keep_mask.sum():,} pts")
+    print(f"    [fallback] 타원체 크롭: {keep_mask.sum():,} pts")
+    return points[keep_mask], colors[keep_mask]
+
+
+def estimate_blade_dir_from_anchor_pts(anchor_pts_3d: np.ndarray) -> Optional[np.ndarray]:
+    """앵커(노란 손잡이) 3D 점군의 PCA 주축으로부터 날 방향 힌트를 추정한다.
+    부호: 칼날이 이미지 오른쪽(+X 방향)을 향하도록 정렬한다."""
+    if len(anchor_pts_3d) < 10:
+        return None
+    c = anchor_pts_3d.mean(axis=0)
+    cov = (anchor_pts_3d - c).T @ (anchor_pts_3d - c) / len(anchor_pts_3d)
+    _, evecs = np.linalg.eigh(cov)
+    blade_dir = evecs[:, -1].copy()  # 가장 큰 고유값 → 긴 축
+    if blade_dir[0] < 0:             # +X (이미지 오른쪽) 방향으로 부호 통일
+        blade_dir = -blade_dir
+    return blade_dir
+
+
+def run_hsv_segmentation(args: argparse.Namespace, session: CaptureSession) -> ObservationData:
+    """노란 손잡이 앵커를 seed로 각 카메라 object mask를 만든 뒤 융합한다."""
+    anchor_points = []
+    masks: Dict[int, np.ndarray] = {}
+
+    for camera_id in session.camera_ids:
+        frame = session.frames[camera_id]
+        calibration = session.calibrations[camera_id]
+        if frame.bgr is None or frame.depth is None:
+            continue
+
+        anchor_mask, object_mask, anchor_points_cam = extract_hsv_object_mask(frame, calibration, args)
+        if anchor_mask is None or anchor_points_cam is None:
+            continue
+        points_cam0 = transform_points(anchor_points_cam, calibration.T_cam0_cam)
+        anchor_points.append(points_cam0)
+        print(f"    cam{camera_id}: HSV 앵커 {len(points_cam0):,} pts")
+        if object_mask is not None and object_mask.sum() > 0:
+            masks[camera_id] = object_mask
+            print(f"    cam{camera_id}: object mask {object_mask.sum():,} px")
+
+    if not anchor_points:
+        raise RuntimeError("노란 손잡이 앵커 검출 실패")
+
+    anchor_center = np.concatenate(anchor_points).mean(axis=0)
+    print(
+        "    앵커 중심 (cam0): "
+        f"({anchor_center[0] * 1000:.1f}, {anchor_center[1] * 1000:.1f}, {anchor_center[2] * 1000:.1f}) mm"
+    )
+
+    if masks:
+        points, colors = fuse_multicam_masks(session, masks, args.z_min, args.z_max)
+    else:
+        points = np.empty((0, 3), dtype=np.float64)
+        colors = None
+
+    if len(points) < 50 or colors is None:
+        print("    [fallback] 마스크 기반 추출 부족 -> 3D 앵커 크롭 사용")
+        points, colors = run_hsv_anchor_crop_segmentation(args, session, anchor_center)
 
     if len(points) < 50:
         raise RuntimeError("세그멘테이션 결과 부족")
@@ -590,6 +731,7 @@ def run_hsv_segmentation(args: argparse.Namespace, session: CaptureSession) -> O
         colors=colors,
         anchor_center=anchor_center,
         blade_dir_hint=blade_dir_hint,
+        masks=(masks if masks else None),
     )
 
 
@@ -847,8 +989,13 @@ def run_icp_stages(
             label = "날 방향 일치도"
 
         print(f"    {label}: " + "  ".join(f"{candidate[3]}={score:.3f}" for candidate, score in zip(candidates, scores)))
-        best_idx = int(np.argmax(scores))
-        best = candidates[best_idx]
+        best_score = max(scores)
+        compatible = [
+            candidate
+            for candidate, score in zip(candidates, scores)
+            if score >= best_score - 0.05
+        ]
+        best = max(compatible, key=lambda item: (item[1], -item[2]))
         print(f"    -> '{best[3]}' 채택 ({label} 기준)")
         return best[0], best[1], best[2]
 
@@ -1320,7 +1467,7 @@ def parse_args() -> argparse.Namespace:
   foundation : FoundationPose 딥러닝 (실패 시 ICP fallback)
 
 세그멘테이션 모드:
-  hsv        : 노란 손잡이 앵커 기반 object crop
+  hsv        : 노란 손잡이 앵커 + depth 연결 object mask
   sam2       : GroundingDINO + SAM2
   depth_roi  : 깊이 기반 테이블 제거 + 최대 클러스터
 
