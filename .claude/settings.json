@@ -19,7 +19,8 @@
       "Bash(2)",
       "Bash(cat /Users/woo/Documents/GitHub/Robot-Lab/rb-ArucoCube_multi_calibration/src3/.venv/lib/python3.13/site-packages/pip-*-info/RECORD)",
       "Bash(ls -1d /Users/woo/Documents/GitHub/Robot-Lab/rb-ArucoCube_multi_calibration/src3/.venv/lib/python3.13/site-packages/*/)",
-      "Bash(ls -la /Users/woo/Documents/GitHub/Robot-Lab/rb-ArucoCube_multi_calibration/src3/Obj_pose_0311*)"
+      "Bash(ls -la /Users/woo/Documents/GitHub/Robot-Lab/rb-ArucoCube_multi_calibration/src3/Obj_pose_0311*)",
+      "Bash(pip3 install:*)"
     ]
   }
 }
