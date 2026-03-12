@@ -1,1 +1,0 @@
-Obj_Step2-(1)_pose_estimate_grounding_sam/Obj_Step2-(1)_pose_grounding_sam.py
