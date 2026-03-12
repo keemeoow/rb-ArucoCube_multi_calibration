@@ -22,7 +22,8 @@
       "Bash(ls -la /Users/woo/Documents/GitHub/Robot-Lab/rb-ArucoCube_multi_calibration/src3/Obj_pose_0311*)",
       "Bash(pip3 install:*)",
       "Bash(find /Users/woo/Documents/GitHub/Robot-Lab/rb-ArucoCube_multi_calibration/data -name *.jpg -o -name *.png)",
-      "Bash(python src3/_multiview_pose_estimation.py --method ref)"
+      "Bash(python src3/_multiview_pose_estimation.py --method ref)",
+      "Bash(ls -la /Users/woo/Documents/GitHub/Robot-Lab/rb-ArucoCube_multi_calibration/*.md /Users/woo/Documents/GitHub/Robot-Lab/rb-ArucoCube_multi_calibration/*.txt /Users/woo/Documents/GitHub/Robot-Lab/rb-ArucoCube_multi_calibration/README*)"
     ]
   }
 }
