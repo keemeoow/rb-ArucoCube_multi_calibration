@@ -863,7 +863,7 @@ def run_pipeline(args):
     if args.visualize:
         print("\n[6] 시각화")
         import subprocess
-        vis_script = os.path.join(os.path.dirname(__file__), "visualize_pose_result.py")
+        vis_script = os.path.join(os.path.dirname(__file__), "Obj_Step3_visualize_pose_result.py")
         subprocess.run([sys.executable, vis_script])
     print("=" * 60)
 

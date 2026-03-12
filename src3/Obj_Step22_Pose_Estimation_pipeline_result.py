@@ -18,9 +18,15 @@ from matplotlib.gridspec import GridSpec
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR))
-from multiview_pose_estimation import (
-    DataLoader, PointCloudProcessor, PoseEstimator, CameraData, PoseValidator
-)
+try:
+    from multiview_pose_estimation import (
+        DataLoader, PointCloudProcessor, PoseEstimator, CameraData, PoseValidator
+    )
+except ModuleNotFoundError:
+    # Fallback for repositories where the pipeline file keeps the Obj_ prefix.
+    from Obj_Step2_multiview_pose_estimation import (
+        DataLoader, PointCloudProcessor, PoseEstimator, CameraData, PoseValidator
+    )
 from scipy.spatial.transform import Rotation
 
 DATA_DIR = str(SCRIPT_DIR / "data")
